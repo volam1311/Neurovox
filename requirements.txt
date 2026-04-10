@@ -1,0 +1,5 @@
+# Pin versions for reproducible deploys; upgrade after smoke-testing.
+mediapipe>=0.10.9,<0.11
+opencv-python>=4.8.0,<5
+numpy>=1.24.0,<3
+certifi>=2024.0.0

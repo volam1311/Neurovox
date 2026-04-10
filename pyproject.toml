@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stroke-eye-monitor"
+version = "0.1.0"
+description = "Low-latency eye landmark monitoring with MediaPipe Face Mesh"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mediapipe>=0.10.9,<0.11",
+    "opencv-python>=4.8.0,<5",
+    "numpy>=1.24.0,<3",
+    "certifi>=2024.0.0",
+]
+
+[project.scripts]
+stroke-eye-monitor = "stroke_eye_monitor.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
