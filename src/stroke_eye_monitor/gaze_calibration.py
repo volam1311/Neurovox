@@ -32,7 +32,7 @@ def _sync_canvas_to_opencv_window(win: str, gw: int, gh: int) -> tuple[int, int]
     return best_w, best_h
 
 
-# 12-point grid: 4×3 (columns × rows), row-major: top row left→right, then middle, then bottom.
+# 12-point grid: 4x3 (columns x rows), row-major.
 _COL_FRAC = (0.08, 0.36, 0.64, 0.92)
 _ROW_FRAC = (0.10, 0.50, 0.90)
 DEFAULT_TARGETS: list[tuple[float, float]] = [
@@ -54,9 +54,9 @@ def run_calibration(
     ridge_lambda: float = 1e-2,
 ) -> GazeCalibration | None:
     """
-    Show fixation dots on a gaze-sized canvas; user looks at each dot and presses SPACE.
-    Iris offsets from MediaPipe (same as inference) are regressed to dot positions with
-    least squares — a small-data analogue of appearance-to-gaze mapping (cf. GazeCapture).
+    Show fixation dots on a gaze-sized canvas (12-point grid).
+    User looks at each dot and presses SPACE. Iris offsets from MediaPipe are regressed to dot
+    positions with ridge regression.
     """
     t_list = targets or DEFAULT_TARGETS
     win = "Calibration — look at the white dot, press SPACE"
