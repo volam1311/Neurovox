@@ -9,7 +9,7 @@ from typing import Any
 
 import cv2
 
-from stroke_eye_monitor.config import MonitorConfig
+from stroke_eye_monitor.config import MonitorConfig, detect_screen_resolution
 from stroke_eye_monitor.detector import FaceMeshEyeDetector
 from stroke_eye_monitor.drawing import draw_face_mesh_eyes, draw_hud, DrawStyle
 from stroke_eye_monitor.metrics import (
@@ -94,6 +94,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Show gaze keyboard overlay (implies --gaze); blink to select letters",
     )
+    p.add_argument(
+        "--collect",
+        action="store_true",
+        help="Show random dots, capture iris coordinates at each, save to CSV, then exit",
+    )
+    p.add_argument(
+        "--collect-csv",
+        type=str,
+        default="gaze_data.csv",
+        help="Output CSV path for --collect (default: gaze_data.csv)",
+    )
+    p.add_argument(
+        "--collect-points",
+        type=int,
+        default=36,
+        help="Number of random points to collect (default: 36)",
+    )
     return p.parse_args(argv)
 
 
@@ -125,6 +142,11 @@ def run(argv: list[str] | None = None) -> int:
         from stroke_eye_monitor.gaze_calibration import calibrate_cli
 
         return calibrate_cli(args, proc_fn, cfg)
+
+    if args.collect:
+        from stroke_eye_monitor.data_collection import collect_cli
+
+        return collect_cli(args, proc_fn, cfg)
 
     cap = cv2.VideoCapture(cfg.camera_index)
     if not cap.isOpened():
@@ -164,18 +186,34 @@ def run(argv: list[str] | None = None) -> int:
             detector.close()
             cap.release()
             return 1
+        gaze_w = gaze_cal.gaze_width
+        gaze_h = gaze_cal.gaze_height
 
     sm_gx: float | None = None
     sm_gy: float | None = None
 
     keyboard = None
     blink_det = None
+    kb_win = "Gaze Keyboard"
+    kb_w, kb_h = 0, 0
     if args.keyboard and gaze_cal is not None:
         from stroke_eye_monitor.keyboard_overlay import GazeKeyboard
+        import numpy as np
+
+        screen = detect_screen_resolution()
+        kb_w = screen[0] if screen else gaze_w
+        kb_h = screen[1] if screen else gaze_h
 
         keyboard = GazeKeyboard()
-        keyboard.layout(gaze_cal.gaze_width, gaze_cal.gaze_height)
+        keyboard.layout(gaze_w, gaze_h)
         blink_det = BlinkDetector()
+
+        cv2.namedWindow(kb_win, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(kb_win, kb_w, kb_h)
+        try:
+            cv2.setWindowProperty(kb_win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        except cv2.error:
+            pass
 
     try:
         while True:
@@ -246,15 +284,15 @@ def run(argv: list[str] | None = None) -> int:
                             hud_lines.append(f"SELECTED: {letter}")
 
             if keyboard is not None:
-                kb_frame = display.copy()
+                kb_canvas = np.zeros((kb_h, kb_w, 3), dtype=np.uint8)
                 gaze_pt = (sm_gx, sm_gy) if sm_gx is not None else None
                 keyboard.draw(
-                    kb_frame,
+                    kb_canvas,
                     left_iris=sm_li,
                     right_iris=sm_ri,
                     gaze_xy=gaze_pt,
                 )
-                display = kb_frame
+                cv2.imshow(kb_win, kb_canvas)
 
             if cfg.mirror_display:
                 display = cv2.flip(display, 1)

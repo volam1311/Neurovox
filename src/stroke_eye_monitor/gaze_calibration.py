@@ -142,6 +142,18 @@ def run_calibration(
 
 
 def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
+    from stroke_eye_monitor.config import detect_screen_resolution
+
+    gw = args.gaze_width
+    gh = args.gaze_height
+
+    screen = detect_screen_resolution()
+    if screen is not None:
+        gw, gh = screen
+        print(f"Detected screen: {gw} x {gh}", flush=True)
+    else:
+        print(f"Could not detect screen; using {gw} x {gh}", flush=True)
+
     cap = cv2.VideoCapture(cfg.camera_index)
     if not cap.isOpened():
         print(f"Cannot open camera index {cfg.camera_index}", file=sys.stderr)
@@ -154,8 +166,8 @@ def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
             cap=cap,
             detector=detector,
             proc_fn=proc_fn,
-            gaze_width=args.gaze_width,
-            gaze_height=args.gaze_height,
+            gaze_width=gw,
+            gaze_height=gh,
             out_path=Path(args.gaze_file),
             samples_per_point=args.gaze_samples,
             ear_min=args.gaze_ear_min,
