@@ -139,6 +139,47 @@ def gaze_feature_vector(
     return np.array([lx, ly, rx, ry, 1.0], dtype=np.float64)
 
 
+class BlinkDetector:
+    """Detect blinks by tracking EAR state transitions.
+
+    Returns True from feed() once per blink, on the rising edge (eye reopens
+    after being closed for at least ``min_closed_frames``).
+    """
+
+    def __init__(
+        self,
+        ear_threshold: float = 0.18,
+        min_closed_frames: int = 2,
+        cooldown_frames: int = 8,
+    ) -> None:
+        self._threshold = ear_threshold
+        self._min_closed = min_closed_frames
+        self._cooldown = cooldown_frames
+        self._closed_count = 0
+        self._cooldown_remaining = 0
+
+    def feed(self, avg_ear: float) -> bool:
+        """Feed the average EAR of both eyes. Returns True once per blink."""
+        if self._cooldown_remaining > 0:
+            self._cooldown_remaining -= 1
+            if avg_ear >= self._threshold:
+                self._closed_count = 0
+            return False
+
+        if avg_ear < self._threshold:
+            self._closed_count += 1
+            return False
+
+        # Eye just reopened
+        if self._closed_count >= self._min_closed:
+            self._closed_count = 0
+            self._cooldown_remaining = self._cooldown
+            return True
+
+        self._closed_count = 0
+        return False
+
+
 def smooth_exponential(prev: float, new: float, alpha: float) -> float:
     if math.isnan(new):
         return prev

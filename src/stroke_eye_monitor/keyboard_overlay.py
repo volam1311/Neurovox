@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import string
+from dataclasses import dataclass, field
+from typing import Any
+
+import cv2
+import numpy as np
+
+# 26 single-letter cells across 4 rows: 7 + 7 + 7 + 5.
+ROW_COLS = (7, 7, 7, 5)
+ROWS = len(ROW_COLS)
+
+LETTERS: list[str] = list(string.ascii_uppercase)
+
+
+@dataclass
+class KeyboardCell:
+    row: int
+    col: int
+    letter: str
+    x0: int = 0
+    y0: int = 0
+    x1: int = 0
+    y1: int = 0
+
+
+@dataclass
+class GazeKeyboard:
+    """26-cell alphabetical gaze keyboard (one letter per cell) with blink selection."""
+
+    cells: list[KeyboardCell] = field(default_factory=list)
+    typed: list[str] = field(default_factory=list)
+
+    _active_cell: int = -1
+    _canvas_w: int = 0
+    _canvas_h: int = 0
+
+    def layout(self, canvas_w: int, canvas_h: int) -> None:
+        """Compute cell pixel bounds for a given canvas size."""
+        self._canvas_w = canvas_w
+        self._canvas_h = canvas_h
+        row_h = canvas_h / ROWS
+        self.cells = []
+        idx = 0
+        for r, ncols in enumerate(ROW_COLS):
+            cell_w = canvas_w / ncols
+            y0 = int(round(r * row_h))
+            y1 = int(round((r + 1) * row_h))
+            for c in range(ncols):
+                x0 = int(round(c * cell_w))
+                x1 = int(round((c + 1) * cell_w))
+                self.cells.append(KeyboardCell(
+                    row=r, col=c, letter=LETTERS[idx],
+                    x0=x0, y0=y0, x1=x1, y1=y1,
+                ))
+                idx += 1
+
+    def hit_test(self, gx: float, gy: float) -> int:
+        """Return cell index the gaze point falls in, or -1."""
+        if not self.cells:
+            return -1
+        ix = int(gx)
+        iy = int(gy)
+        for i, c in enumerate(self.cells):
+            if c.x0 <= ix < c.x1 and c.y0 <= iy < c.y1:
+                return i
+        return -1
+
+    def update_gaze(self, gx: float, gy: float) -> None:
+        self._active_cell = self.hit_test(gx, gy)
+
+    def select(self) -> str | None:
+        """Called on blink. Returns the selected letter or None."""
+        if self._active_cell < 0 or self._active_cell >= len(self.cells):
+            return None
+        letter = self.cells[self._active_cell].letter
+        self.typed.append(letter)
+        return letter
+
+    @property
+    def typed_text(self) -> str:
+        return "".join(self.typed)
+
+    @property
+    def active_cell_index(self) -> int:
+        return self._active_cell
+
+    def draw(
+        self,
+        frame: Any,
+        *,
+        left_iris: tuple[float, float] | None = None,
+        right_iris: tuple[float, float] | None = None,
+        gaze_xy: tuple[float, float] | None = None,
+    ) -> None:
+        """Draw the keyboard grid on the frame (semi-transparent).
+
+        Cell coordinates are in calibration-canvas space; they are rescaled
+        to fit the actual frame dimensions.
+        """
+        if not self.cells or self._canvas_w < 1 or self._canvas_h < 1:
+            return
+        h, w = frame.shape[:2]
+        sx = w / self._canvas_w
+        sy = h / self._canvas_h
+        overlay = frame.copy()
+
+        for i, cell in enumerate(self.cells):
+            is_active = (i == self._active_cell)
+            dx0 = int(round(cell.x0 * sx))
+            dy0 = int(round(cell.y0 * sy))
+            dx1 = int(round(cell.x1 * sx))
+            dy1 = int(round(cell.y1 * sy))
+
+            bg_color = (80, 60, 20) if is_active else (30, 30, 30)
+            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), bg_color, -1)
+            border_color = (0, 220, 255) if is_active else (100, 100, 100)
+            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), border_color, 2)
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cell_px_w = dx1 - dx0
+            scale = max(0.5, min(1.4, cell_px_w / 80.0))
+            thickness = 2
+            (tw, th), _ = cv2.getTextSize(cell.letter, font, scale, thickness)
+            tx = (dx0 + dx1) // 2 - tw // 2
+            ty = (dy0 + dy1) // 2 + th // 2
+            text_color = (0, 255, 255) if is_active else (220, 220, 220)
+            cv2.putText(overlay, cell.letter, (tx, ty), font, scale, text_color, thickness, cv2.LINE_AA)
+
+        cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, dst=frame)
+
+        bar_h = 40
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Typed text bar at the top
+        typed_str = self.typed_text
+        if typed_str:
+            cv2.rectangle(frame, (0, 0), (w, bar_h), (20, 20, 20), -1)
+            cv2.putText(
+                frame, typed_str, (10, 30),
+                font, 0.9, (0, 255, 200), 2, cv2.LINE_AA,
+            )
+
+        # Iris coordinates + gaze point bar at the bottom
+        coords_parts: list[str] = []
+        if left_iris is not None:
+            coords_parts.append(f"L({left_iris[0]:+.2f},{left_iris[1]:+.2f})")
+        if right_iris is not None:
+            coords_parts.append(f"R({right_iris[0]:+.2f},{right_iris[1]:+.2f})")
+        if gaze_xy is not None:
+            coords_parts.append(f"Gaze({gaze_xy[0]:.0f},{gaze_xy[1]:.0f})")
+        if coords_parts:
+            coords_text = "  ".join(coords_parts)
+            cv2.rectangle(frame, (0, h - bar_h), (w, h), (20, 20, 20), -1)
+            cv2.putText(
+                frame, coords_text, (10, h - 12),
+                font, 0.55, (180, 255, 180), 1, cv2.LINE_AA,
+            )

@@ -9,10 +9,11 @@ from typing import Any
 
 import cv2
 
-from stroke_eye_monitor.config import MonitorConfig
+from stroke_eye_monitor.config import MonitorConfig, detect_screen_resolution
 from stroke_eye_monitor.detector import FaceMeshEyeDetector
 from stroke_eye_monitor.drawing import draw_face_mesh_eyes, draw_hud, DrawStyle
 from stroke_eye_monitor.metrics import (
+    BlinkDetector,
     compute_eye_metrics,
     gaze_feature_vector,
     smooth_exponential,
@@ -49,7 +50,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--calibrate",
         action="store_true",
-        help="Run 12-point gaze calibration (saves --gaze-file), then exit",
+        help="Run gaze calibration (saves --gaze-file), then exit",
     )
     p.add_argument(
         "--gaze",
@@ -88,6 +89,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1e-2,
         help="Ridge regularization used during calibration fit (only affects --calibrate)",
     )
+    p.add_argument(
+        "--keyboard",
+        action="store_true",
+        help="Show gaze keyboard overlay (implies --gaze); blink to select letters",
+    )
+    p.add_argument(
+        "--collect",
+        action="store_true",
+        help="Show random dots, capture iris coordinates at each, save to CSV, then exit",
+    )
+    p.add_argument(
+        "--collect-csv",
+        type=str,
+        default="gaze_data.csv",
+        help="Output CSV path for --collect (default: gaze_data.csv)",
+    )
+    p.add_argument(
+        "--collect-points",
+        type=int,
+        default=36,
+        help="Number of random points to collect (default: 36)",
+    )
     return p.parse_args(argv)
 
 
@@ -102,6 +125,10 @@ def _letterbox_width(frame: Any, target_w: int) -> Any:
 
 def run(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    if args.keyboard:
+        args.gaze = True
+
     cfg = MonitorConfig(
         camera_index=args.camera,
         process_width=args.width,
@@ -115,6 +142,11 @@ def run(argv: list[str] | None = None) -> int:
         from stroke_eye_monitor.gaze_calibration import calibrate_cli
 
         return calibrate_cli(args, proc_fn, cfg)
+
+    if args.collect:
+        from stroke_eye_monitor.data_collection import collect_cli
+
+        return collect_cli(args, proc_fn, cfg)
 
     cap = cv2.VideoCapture(cfg.camera_index)
     if not cap.isOpened():
@@ -154,9 +186,34 @@ def run(argv: list[str] | None = None) -> int:
             detector.close()
             cap.release()
             return 1
+        gaze_w = gaze_cal.gaze_width
+        gaze_h = gaze_cal.gaze_height
 
     sm_gx: float | None = None
     sm_gy: float | None = None
+
+    keyboard = None
+    blink_det = None
+    kb_win = "Gaze Keyboard"
+    kb_w, kb_h = 0, 0
+    if args.keyboard and gaze_cal is not None:
+        from stroke_eye_monitor.keyboard_overlay import GazeKeyboard
+        import numpy as np
+
+        screen = detect_screen_resolution()
+        kb_w = screen[0] if screen else gaze_w
+        kb_h = screen[1] if screen else gaze_h
+
+        keyboard = GazeKeyboard()
+        keyboard.layout(gaze_w, gaze_h)
+        blink_det = BlinkDetector()
+
+        cv2.namedWindow(kb_win, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(kb_win, kb_w, kb_h)
+        try:
+            cv2.setWindowProperty(kb_win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        except cv2.error:
+            pass
 
     try:
         while True:
@@ -199,7 +256,6 @@ def run(argv: list[str] | None = None) -> int:
                     )
 
                 if gaze_cal is not None:
-                    # Blink/half-closed frames make iris landmarks jump; skip updates.
                     if m.left_ear >= args.gaze_ear_min and m.right_ear >= args.gaze_ear_min:
                         g = gaze_feature_vector(m)
                     else:
@@ -213,8 +269,30 @@ def run(argv: list[str] | None = None) -> int:
                         else:
                             sm_gx = a * rx + (1.0 - a) * sm_gx
                             sm_gy = a * ry + (1.0 - a) * sm_gy
-                        # Intentionally not drawing the gaze point overlay.
-                        # (User requested to show only iris nx/ny metrics.)
+
+                    if sm_gx is not None and sm_gy is not None:
+                        hud_lines.append(f"Gaze xy: ({sm_gx:.0f}, {sm_gy:.0f})")
+
+                if keyboard is not None and blink_det is not None:
+                    if sm_gx is not None and sm_gy is not None:
+                        keyboard.update_gaze(sm_gx, sm_gy)
+
+                    avg_ear = (m.left_ear + m.right_ear) / 2.0
+                    if blink_det.feed(avg_ear):
+                        letter = keyboard.select()
+                        if letter is not None:
+                            hud_lines.append(f"SELECTED: {letter}")
+
+            if keyboard is not None:
+                kb_canvas = np.zeros((kb_h, kb_w, 3), dtype=np.uint8)
+                gaze_pt = (sm_gx, sm_gy) if sm_gx is not None else None
+                keyboard.draw(
+                    kb_canvas,
+                    left_iris=sm_li,
+                    right_iris=sm_ri,
+                    gaze_xy=gaze_pt,
+                )
+                cv2.imshow(kb_win, kb_canvas)
 
             if cfg.mirror_display:
                 display = cv2.flip(display, 1)
@@ -231,10 +309,17 @@ def run(argv: list[str] | None = None) -> int:
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
+            if key == ord("d") and keyboard is not None and keyboard.typed:
+                keyboard.typed.pop()
     finally:
         detector.close()
         cap.release()
         cv2.destroyAllWindows()
+
+    if keyboard is not None:
+        typed = keyboard.typed_text
+        if typed:
+            print(f"Typed: {typed}")
 
     return 0
 
