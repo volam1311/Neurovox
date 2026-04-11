@@ -61,7 +61,7 @@ def run(argv: list[str] | None = None) -> int:
         args.gaze = True
 
     cfg = MonitorConfig(
-        camera_index=args.camera,
+        camera_index=1,
         process_width=args.width,
         mirror_display=not args.no_mirror,
     )
