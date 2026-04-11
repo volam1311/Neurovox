@@ -36,7 +36,7 @@ from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
 
-FEATURE_COLS = [f"f{i}" for i in range(8)]
+FEATURE_COLS = [f"f{i}" for i in range(11)]
 TARGET_COLS = ["target_x", "target_y"]
 PLOT_DIR = Path("plots")
 

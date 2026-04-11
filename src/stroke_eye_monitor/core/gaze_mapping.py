@@ -220,7 +220,7 @@ class GazeCalibration:
 
     gaze_width: int
     gaze_height: int
-    feature_dim: int = 8
+    feature_dim: int = 11
     model_type: str = "ridge"
 
     coeff_x: list[float] = field(default_factory=list)
@@ -299,7 +299,7 @@ class GazeCalibration:
         version = int(d.get("version", 6))
         gw = int(d["gaze_width"])
         gh = int(d["gaze_height"])
-        fd = int(d.get("feature_dim", 8))
+        fd = int(d.get("feature_dim", 11))
 
         if version >= 7 and "model_blob" in d:
             blob = base64.b64decode(d["model_blob"])
@@ -379,7 +379,7 @@ def fit_gaze_model(
     """Fit the best gaze mapping model via cross-validation (or a forced ``model``).
 
     Uses leave-one-out when there are few training rows; shuffled K-fold when there
-    are many (e.g. every captured frame per calibration dot).
+    are many. Callers should pass one row per fixation (e.g. median-aggregated per target).
 
     Returns a version-7 ``GazeCalibration`` backed by an sklearn pipeline.
     """

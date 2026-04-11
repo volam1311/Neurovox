@@ -16,7 +16,6 @@ from stroke_eye_monitor.core.gaze_mapping import (
     _GAZE_CV_LOO_MAX_N,
     _build_candidates,
     _gaze_cv_mean_error,
-    fit_affine_gaze,
     fit_gaze_model,
 )
 from stroke_eye_monitor.core.metrics import compute_eye_metrics, gaze_feature_vector
@@ -80,6 +79,9 @@ def run_calibration(
     Show fixation dots on a gaze-sized canvas (random positions by default, or optional grid).
     User looks at each dot and presses SPACE. Iris features are regressed to dot positions.
     """
+    if samples_per_point < 1:
+        raise ValueError("samples_per_point must be at least 1")
+
     if targets is not None:
         t_list = targets
     elif use_fixed_grid:
@@ -180,10 +182,16 @@ def run_calibration(
     total = len(all_samples)
     n_dots = len(t_list)
     print(
-        f"Saved {total} rows to {csv_path}; fitting gaze model on all {total} samples "
-        f"({n_dots} on-screen targets, repeat target per frame)",
+        f"Saved {total} rows to {csv_path} (raw frames). "
+        f"Fitting maps each of the {n_dots} fixation targets using a per-target median feature "
+        f"(see messages below) so tree models do not overfit duplicate frames.",
         flush=True,
     )
+
+    if not feature_rows:
+        raise RuntimeError(
+            "No gaze samples were collected (check camera, lighting, and --gaze-ear-min).",
+        )
 
     # ── evaluate all models and let user choose ──
     cal = _select_and_fit_model(
@@ -234,6 +242,29 @@ _MODEL_DISPLAY_NAMES = {
 }
 
 
+def _aggregate_samples_by_target_pixel(
+    feature_rows: list[np.ndarray],
+    screen_xy: list[tuple[float, float]],
+) -> tuple[list[np.ndarray], list[tuple[float, float]]]:
+    """One training row per on-screen target: median feature vector per (tx, ty) pixel.
+
+    Many nearly-identical frames per fixation point confuse tree/boosting models: they
+    memorize label noise and extrapolate wildly at runtime (gaze clamped to a screen corner).
+    Ridge is less affected; aggregation still stabilizes CV and live behaviour.
+    """
+    buckets: dict[tuple[int, int], list[np.ndarray]] = {}
+    for row, (sx, sy) in zip(feature_rows, screen_xy, strict=True):
+        key = (int(round(sx)), int(round(sy)))
+        buckets.setdefault(key, []).append(np.asarray(row, dtype=np.float64).reshape(-1))
+    out_feat: list[np.ndarray] = []
+    out_xy: list[tuple[float, float]] = []
+    for key in sorted(buckets.keys()):
+        arr = np.stack(buckets[key], axis=0)
+        out_feat.append(np.median(arr, axis=0))
+        out_xy.append((float(key[0]), float(key[1])))
+    return out_feat, out_xy
+
+
 def _select_and_fit_model(
     feature_rows: list[np.ndarray],
     screen_xy: list[tuple[float, float]],
@@ -244,6 +275,20 @@ def _select_and_fit_model(
     preferred_model: str = "auto",
 ) -> GazeCalibration:
     """Evaluate all models with CV, print a table, then fit the chosen one."""
+    n_raw = len(feature_rows)
+    feature_rows, screen_xy = _aggregate_samples_by_target_pixel(feature_rows, screen_xy)
+    if len(feature_rows) < n_raw:
+        print(
+            f"Using {len(feature_rows)} unique fixation targets "
+            f"(median of features over {n_raw} captured frames) for model fitting.",
+            flush=True,
+        )
+    if len(feature_rows) < 3:
+        raise RuntimeError(
+            f"Need at least 3 distinct on-screen targets after aggregation; got {len(feature_rows)}. "
+            "Try more calibration points or a larger gaze canvas.",
+        )
+
     F = np.stack([np.asarray(r, dtype=np.float64).reshape(-1) for r in feature_rows], axis=0)
     Y = np.array(screen_xy, dtype=np.float64)
     candidates = _build_candidates(ridge_lambda, n_samples=len(feature_rows))
@@ -331,7 +376,7 @@ def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
                 n_calibration_points=max(3, int(getattr(args, "gaze_cal_points", 36))),
                 calibration_seed=getattr(args, "gaze_cal_seed", None),
             )
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
         if cal is None:
