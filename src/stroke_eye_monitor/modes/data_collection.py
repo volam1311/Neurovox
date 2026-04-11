@@ -1,3 +1,10 @@
+"""Raw iris-offset collection for analysis.
+
+This mode saves **iris offsets + screen dot** per point. It does **not** write the same
+8-D ``gaze_feature_vector`` as ``--calibrate`` (which adds head pose + bias). Do not
+expect to drop ``--collect`` CSV into the gaze mapper; use ``--calibrate`` for the app.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -193,7 +200,7 @@ def collect_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
             canvas_height=ch,
             out_csv=Path(args.collect_csv),
             num_points=args.collect_points,
-            samples_per_point=args.gaze_samples,
+            samples_per_point=args.collect_samples,
             ear_min=args.gaze_ear_min,
         )
         if not ok:

@@ -23,3 +23,16 @@ gaze_calibration.json
 gaze_data*.csv
 .vscode/
 tests/
+*.json
+*.csv
+*.onnx
+*.pkl
+*.pt
+*.pth
+*.pkl.gz
+*.pkl.bz2
+*.pkl.xz
+*.pkl.tar
+*.pkl.tar.gz
+*.pkl.tar.bz2
+*.pkl.tar.xz
