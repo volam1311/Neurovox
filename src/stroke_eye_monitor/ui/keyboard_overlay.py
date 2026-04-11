@@ -48,7 +48,11 @@ class GazeKeyboard:
         self._canvas_w = canvas_w
         self._canvas_h = canvas_h
         self._base_image = None
-        row_h = canvas_h / ROWS
+
+        # Reserve the top 350 pixels for the huge history & prediction HUD
+        top_margin = 350
+        usable_h = canvas_h - top_margin
+        row_h = usable_h / ROWS
         self.cells = []
 
         # Base key width on the longest row (QWERTYUIOP = 10 keys)
@@ -56,8 +60,8 @@ class GazeKeyboard:
         key_w = canvas_w / max_keys
 
         for r, row_keys in enumerate(QWERTY_ROWS):
-            y0 = int(round(r * row_h))
-            y1 = int(round((r + 1) * row_h))
+            y0 = int(round(top_margin + r * row_h))
+            y1 = int(round(top_margin + (r + 1) * row_h))
 
             # Center the row based on specific key count
             row_px_width = len(row_keys) * key_w
@@ -126,18 +130,17 @@ class GazeKeyboard:
             sentence = "".join(self.typed).strip()
             print("\n>>> PREDICT TRIGGERED! <<<")
             print(f"=== CONFIRMED SENTENCE: {sentence} ===\n")
-            
+
             if sentence:
                 self.history.append(sentence)
-                # Keep only the last 3 sentences so it doesn't clutter the screen
-                if len(self.history) > 3:
+                # Keep 4 lines visible
+                if len(self.history) > 4:
                     self.history.pop(0)
 
             # Clear text for the next sentence
             self.typed.clear()
 
             return "PREDICT"
-
 
         # A single blink does nothing on its own (typing is handled purely by the 800ms dwell)
         return None
@@ -175,8 +178,12 @@ class GazeKeyboard:
 
                 font = cv2.FONT_HERSHEY_DUPLEX
                 cell_px_w = dx1 - dx0
-                scale = max(0.55, min(1.5, cell_px_w / 72.0))
-                thickness = max(3, min(6, int(round(cell_px_w / 28.0))))
+                scale = max(
+                    1.0, min(3.0, cell_px_w / 40.0)
+                )  # Drastically increase scale
+                thickness = max(
+                    3, min(8, int(round(cell_px_w / 20.0)))
+                )  # Drastically increase thickness
                 (tw, th), _ = cv2.getTextSize(cell.letter, font, scale, thickness)
                 tx = (dx0 + dx1) // 2 - tw // 2
                 ty = (dy0 + dy1) // 2 + th // 2
@@ -206,8 +213,8 @@ class GazeKeyboard:
 
             font = cv2.FONT_HERSHEY_DUPLEX
             cell_px_w = dx1 - dx0
-            scale = max(0.55, min(1.5, cell_px_w / 72.0))
-            thickness = min((max(3, min(6, int(round(cell_px_w / 28.0))))) + 1, 7)
+            scale = max(1.0, min(3.0, cell_px_w / 40.0))  # Match active cell sizing
+            thickness = min((max(3, min(8, int(round(cell_px_w / 20.0))))) + 1, 9)
             (tw, th), _ = cv2.getTextSize(cell.letter, font, scale, thickness)
             tx = (dx0 + dx1) // 2 - tw // 2
             ty = (dy0 + dy1) // 2 + th // 2
@@ -236,33 +243,39 @@ class GazeKeyboard:
 
         cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, dst=frame)
 
-        bar_h = 40
+        bar_h = 60
         font = cv2.FONT_HERSHEY_SIMPLEX
 
         hint = "Gaze at a letter for 800ms   |   Blink 3 times fast to PREDICT"
         cv2.rectangle(frame, (0, 0), (w, bar_h), (20, 20, 20), -1)
-        cv2.putText(frame, hint, (10, 26), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(frame, hint, (20, 42), font, 1.0, (200, 200, 200), 2, cv2.LINE_AA)
 
         # Draw confirmed sentences history and current typing together in a dark panel
         typed_str = self.typed_text
         lines_to_draw = []
         for i, hist_str in enumerate(self.history):
-            lines_to_draw.append((f"> {hist_str}", (150, 150, 150), 0.7, 2))  # Gray for history
-            
+            lines_to_draw.append(
+                (f"> {hist_str}", (150, 150, 150), 1.6, 4)
+            )  # Giant gray text for history
+
         if typed_str:
-            lines_to_draw.append((typed_str + "_", (0, 255, 200), 0.9, 3))    # Bright Cyan for active typing
-            
+            lines_to_draw.append(
+                (typed_str + "_", (0, 255, 200), 2.2, 5)
+            )  # Absolutely massive Cyan for active typing
+
         if lines_to_draw:
-            line_height = 36
-            total_height = len(lines_to_draw) * line_height + 10
+            line_height = 65
+            total_height = len(lines_to_draw) * line_height + 20
             y2 = bar_h + total_height
-            
+
             # Semi-transparent dark background for readability
             msg_bg = frame[bar_h:y2, 0:w].copy()
             cv2.rectangle(msg_bg, (0, 0), (w, total_height), (10, 10, 10), -1)
-            cv2.addWeighted(msg_bg, 0.85, frame[bar_h:y2, 0:w], 0.15, 0, dst=frame[bar_h:y2, 0:w])
-            
-            current_y = bar_h + 30
+            cv2.addWeighted(
+                msg_bg, 0.85, frame[bar_h:y2, 0:w], 0.15, 0, dst=frame[bar_h:y2, 0:w]
+            )
+
+            current_y = bar_h + 50
             for text, color, scale, thickness in lines_to_draw:
                 cv2.putText(
                     frame,
