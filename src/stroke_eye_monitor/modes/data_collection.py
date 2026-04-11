@@ -177,7 +177,13 @@ def collect_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
     else:
         print(f"Could not detect screen; using {cw} x {ch}", flush=True)
 
-    cap = cv2.VideoCapture(cfg.camera_index)
+    print(f"Opening camera {cfg.camera_index} for data collection...", flush=True)
+    import os
+
+    if os.name == "nt":
+        cap = cv2.VideoCapture(cfg.camera_index, cv2.CAP_DSHOW)
+    else:
+        cap = cv2.VideoCapture(cfg.camera_index)
     if not cap.isOpened():
         print(f"Cannot open camera index {cfg.camera_index}", file=sys.stderr)
         return 1

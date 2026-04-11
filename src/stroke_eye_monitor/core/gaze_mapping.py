@@ -17,6 +17,11 @@ class GazeCalibration:
     coeff_x: list[float]
     coeff_y: list[float]
     feature_dim: int = 8
+    dwell_ms: int = 600
+    # From blink calibration (or derived from dwell); used by gaze keyboard burst logic
+    blink_burst_window_s: float = 5.0
+    blink_commit_pause_s: float = 0.55
+    blink_idle_abort_s: float = 5.0
 
     def predict(self, features: np.ndarray) -> tuple[float, float]:
         """features length must match ``feature_dim`` (default 8: iris + head Rodrigues + bias)."""
@@ -35,12 +40,16 @@ class GazeCalibration:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": 6,
+            "version": 8,
             "gaze_width": self.gaze_width,
             "gaze_height": self.gaze_height,
             "coeff_x": self.coeff_x,
             "coeff_y": self.coeff_y,
             "feature_dim": self.feature_dim,
+            "dwell_ms": self.dwell_ms,
+            "blink_burst_window_s": self.blink_burst_window_s,
+            "blink_commit_pause_s": self.blink_commit_pause_s,
+            "blink_idle_abort_s": self.blink_idle_abort_s,
         }
 
     @classmethod
@@ -52,6 +61,10 @@ class GazeCalibration:
             coeff_x=list(map(float, d["coeff_x"])),
             coeff_y=list(map(float, d["coeff_y"])),
             feature_dim=fd,
+            dwell_ms=int(d.get("dwell_ms", 600)),
+            blink_burst_window_s=float(d.get("blink_burst_window_s", 5.0)),
+            blink_commit_pause_s=float(d.get("blink_commit_pause_s", 0.55)),
+            blink_idle_abort_s=float(d.get("blink_idle_abort_s", 5.0)),
         )
 
     def save(self, path: Path | str) -> None:
@@ -72,6 +85,7 @@ def fit_affine_gaze(
     gaze_height: int,
     *,
     ridge_lambda: float = 1e-2,
+    dwell_ms: int = 600,
 ) -> GazeCalibration:
     """Ridge-regularized affine map: screen ≈ W @ features.
 
@@ -96,4 +110,5 @@ def fit_affine_gaze(
         coeff_x=wx.tolist(),
         coeff_y=wy.tolist(),
         feature_dim=int(F.shape[1]),
+        dwell_ms=dwell_ms,
     )

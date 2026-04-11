@@ -72,6 +72,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Ridge regularization used during calibration fit (only affects --calibrate)",
     )
     p.add_argument(
+        "--no-auto-calibrate",
+        action="store_true",
+        help="If set, require an existing --gaze-file instead of running calibration when missing",
+    )
+    p.add_argument(
+        "--blink-close",
+        type=float,
+        default=0.12,
+        help="Mean EAR below this = closed for blink (higher = gentler close needed; default: 0.12)",
+    )
+    p.add_argument(
+        "--blink-open",
+        type=float,
+        default=0.16,
+        help="Mean EAR above this = open again after a blink (lower = easier reopen; must be > --blink-close)",
+    )
+    p.add_argument(
         "--keyboard",
         action="store_true",
         help="Show gaze keyboard overlay (implies --gaze); blink to select letters",
@@ -92,5 +109,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=36,
         help="Number of random points to collect (default: 36)",
+    )
+    p.add_argument(
+        "--no-voice",
+        action="store_true",
+        help="Disable microphone (Whisper STT) and TTS when using --keyboard",
+    )
+    p.add_argument(
+        "--audio-chunk-seconds",
+        type=float,
+        default=4.0,
+        help="Seconds of audio per Whisper chunk when voice is enabled (default: 4)",
+    )
+    p.add_argument(
+        "--voice-play-backend",
+        type=str,
+        choices=("auto", "sounddevice", "system"),
+        default=None,
+        help="TTS playback: auto (sounddevice then OS), sounddevice, or system (overrides env)",
+    )
+    p.add_argument(
+        "--voice-record-backend",
+        type=str,
+        choices=("auto", "sounddevice", "soundcard"),
+        default=None,
+        help="Microphone STT: auto, sounddevice, or soundcard (overrides env)",
+    )
+    p.add_argument(
+        "--whisper-language",
+        type=str,
+        default=None,
+        help="Whisper language code (e.g. en) to reduce wrong-language hallucinations",
+    )
+    p.add_argument(
+        "--stt-rms-threshold",
+        type=float,
+        default=None,
+        help="Min RMS (0..1) to send audio to Whisper; higher = fewer false triggers",
+    )
+    p.add_argument(
+        "--stt-peak-threshold",
+        type=float,
+        default=None,
+        help="Min sample peak (0..1) for the chunk; use with RMS for silence gating",
     )
     return p.parse_args(argv)

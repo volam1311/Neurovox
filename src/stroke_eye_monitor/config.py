@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 
 
-def detect_screen_resolution() -> tuple[int, int] | None:
-    """Auto-detect the primary display resolution on macOS."""
+def _detect_windows() -> tuple[int, int] | None:
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        user32.SetProcessDPIAware()
+        return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+    except Exception:
+        return None
+
+
+def _detect_macos() -> tuple[int, int] | None:
     try:
         out = subprocess.check_output(
             ["system_profiler", "SPDisplaysDataType"],
@@ -23,6 +33,13 @@ def detect_screen_resolution() -> tuple[int, int] | None:
     except Exception:
         pass
     return None
+
+
+def detect_screen_resolution() -> tuple[int, int] | None:
+    """Auto-detect primary display resolution (Windows + macOS)."""
+    if os.name == "nt":
+        return _detect_windows()
+    return _detect_macos()
 
 
 @dataclass(frozen=True)
