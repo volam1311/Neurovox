@@ -32,8 +32,11 @@ class KeyboardSession:
     @staticmethod
     def create_session(gaze_cal: GazeCalibration) -> KeyboardSession:
         win = "Main Output"  # We'll just draw onto the main app window
-        
-        kb_w, kb_h = detect_screen_resolution() or (gaze_cal.gaze_width, gaze_cal.gaze_height)
+
+        kb_w, kb_h = detect_screen_resolution() or (
+            gaze_cal.gaze_width,
+            gaze_cal.gaze_height,
+        )
 
         keyboard = GazeKeyboard()
         keyboard.layout(kb_w, kb_h)

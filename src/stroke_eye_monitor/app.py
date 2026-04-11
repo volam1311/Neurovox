@@ -67,6 +67,7 @@ def run(argv: list[str] | None = None) -> int:
         args.gaze = True
 
     from stroke_eye_monitor.config import detect_screen_resolution
+
     screen_res = detect_screen_resolution()
     target_width = screen_res[0] if screen_res else args.width
 
@@ -83,7 +84,11 @@ def run(argv: list[str] | None = None) -> int:
             fh, fw = frame.shape[:2]
             scale = min(sw / fw, sh / fh)
             nh, nw = int(round(fh * scale)), int(round(fw * scale))
-            return cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+            return cv2.resize(
+                frame,
+                (nw, nh),
+                interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
+            )
         return letterbox_to_width(frame, cfg.process_width)
 
     if args.calibrate:
@@ -113,10 +118,12 @@ def run(argv: list[str] | None = None) -> int:
     pipeline = _build_live_pipeline(args, gaze_cal)
     fps_meter = FpsMeter()
     capture = ThreadedVideoCapture(cap)
-    
+
     cv2.namedWindow(cfg.window_name, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(cfg.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    
+    cv2.setWindowProperty(
+        cfg.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
+    )
+
     capture.start()
 
     try:
@@ -144,19 +151,19 @@ def run(argv: list[str] | None = None) -> int:
             if screen_res is not None:
                 sw, sh = screen_res
                 fh, fw = display.shape[:2]
-                
+
                 # Create a black background to match the OS resolution exactly
                 canvas = np.zeros((sh, sw, 3), dtype=np.uint8)
-                
+
                 # Center the camera image inside the canvas
                 dx = (sw - fw) // 2
                 dy = (sh - fh) // 2
-                
+
                 if dx >= 0 and dy >= 0:
-                    canvas[dy:dy+fh, dx:dx+fw] = display
+                    canvas[dy : dy + fh, dx : dx + fw] = display
                 else:
                     canvas = cv2.resize(display, (sw, sh))
-                    
+
                 display = canvas
 
             draw_hud(
