@@ -14,42 +14,47 @@ class RankedSuggestion:
 
 @runtime_checkable
 class CompletionBackend(Protocol):
-    """Rank plausible **full replies from the person**, using chatbot question + short fragment."""
+    """Expand abbreviated gaze-typed text into ranked full sentences."""
 
     def complete(
-        self, *, question: str, reply: str, context: str | None = None
+        self, *, abbreviated: str, history: list[str] | None = None
     ) -> str:
         """Human-readable ranked lines (``1. …`` through ``k``)."""
 
     def complete_ranked(
         self,
         *,
-        question: str,
-        reply: str,
-        context: str | None = None,
-        k: int = 5,
+        abbreviated: str,
+        history: list[str] | None = None,
+        spoken_context: str | None = None,
+        k: int = 3,
     ) -> list[RankedSuggestion]:
-        """Return up to ``k`` candidate replies from the person (rank 1 = most likely)."""
+        """Return up to ``k`` expansions.
+
+        ``history`` = prior **confirmed** utterances in this session (oldest first),
+        **excluding** the current abbreviated fragment.
+        ``spoken_context`` = optional microphone transcript (questions / room context).
+        """
 
 
 class EchoBackend:
-    """Stub: echoes the raw reply as rank 1 (for wiring without an API key)."""
+    """Stub: echoes the raw input as rank 1 (for wiring without an API key)."""
 
     def complete(
-        self, *, question: str, reply: str, context: str | None = None
+        self, *, abbreviated: str, history: list[str] | None = None
     ) -> str:
-        ranked = self.complete_ranked(question=question, reply=reply, context=context, k=1)
+        ranked = self.complete_ranked(abbreviated=abbreviated, history=history, k=1)
         return "\n".join(f"{s.rank}. {s.text}" for s in ranked)
 
     def complete_ranked(
         self,
         *,
-        question: str,
-        reply: str,
-        context: str | None = None,
-        k: int = 5,
+        abbreviated: str,
+        history: list[str] | None = None,
+        spoken_context: str | None = None,
+        k: int = 3,
     ) -> list[RankedSuggestion]:
-        _ = context
         _ = k
-        _ = question
-        return [RankedSuggestion(rank=1, text=reply.strip())]
+        _ = history
+        _ = spoken_context
+        return [RankedSuggestion(rank=1, text=abbreviated.strip())]

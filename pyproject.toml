@@ -16,6 +16,12 @@ dependencies = [
     "certifi>=2024.0.0",
     "openai>=1.40.0,<2",
     "python-dotenv>=1.0.0,<2",
+    "sounddevice>=0.4.6,<1",
+]
+
+[project.optional-dependencies]
+audio = [
+    "soundcard>=0.4.2,<1",
 ]
 
 [project.scripts]
