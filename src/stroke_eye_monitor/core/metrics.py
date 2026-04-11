@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Sequence
 
 import cv2
@@ -67,9 +68,6 @@ class EyeMetrics:
     ear_asymmetry: float
     left_iris_offset: tuple[float, float]
     right_iris_offset: tuple[float, float]
-
-
-from dataclasses import dataclass
 
 
 def compute_eye_metrics(landmarks: Sequence, h: int, w: int) -> EyeMetrics:
