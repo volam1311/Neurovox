@@ -49,7 +49,9 @@ def run_collection(
     except cv2.error:
         pass
 
-    canvas_width, canvas_height = sync_opencv_window_canvas(win, canvas_width, canvas_height)
+    canvas_width, canvas_height = sync_opencv_window_canvas(
+        win, canvas_width, canvas_height
+    )
     print(f"Canvas: {canvas_width} x {canvas_height}", flush=True)
 
     rows: list[dict[str, object]] = []
@@ -83,8 +85,14 @@ def run_collection(
                 progress = f"  collecting {len(collected_l)}/{samples_per_point}"
             hint = f"{idx + 1}/{num_points}{progress}  SPACE=capture  Q=abort"
             cv2.putText(
-                board, hint, (16, 36),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (220, 220, 220), 2, cv2.LINE_AA,
+                board,
+                hint,
+                (16, 36),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (220, 220, 220),
+                2,
+                cv2.LINE_AA,
             )
 
             if collecting and result.landmarks is not None:
@@ -104,15 +112,17 @@ def run_collection(
                     r_arr = np.array(collected_r)
                     med_l = np.median(l_arr, axis=0)
                     med_r = np.median(r_arr, axis=0)
-                    rows.append({
-                        "point_id": idx + 1,
-                        "screen_x": tx,
-                        "screen_y": ty,
-                        "left_nx": round(float(med_l[0]), 6),
-                        "left_ny": round(float(med_l[1]), 6),
-                        "right_nx": round(float(med_r[0]), 6),
-                        "right_ny": round(float(med_r[1]), 6),
-                    })
+                    rows.append(
+                        {
+                            "point_id": idx + 1,
+                            "screen_x": tx,
+                            "screen_y": ty,
+                            "left_nx": round(float(med_l[0]), 6),
+                            "left_ny": round(float(med_l[1]), 6),
+                            "right_nx": round(float(med_r[0]), 6),
+                            "right_ny": round(float(med_r[1]), 6),
+                        }
+                    )
                     print(
                         f"  captured: L({med_l[0]:+.4f},{med_l[1]:+.4f}) "
                         f"R({med_r[0]:+.4f},{med_r[1]:+.4f})",
@@ -141,7 +151,15 @@ def run_collection(
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["point_id", "screen_x", "screen_y", "left_nx", "left_ny", "right_nx", "right_ny"]
+    fieldnames = [
+        "point_id",
+        "screen_x",
+        "screen_y",
+        "left_nx",
+        "left_ny",
+        "right_nx",
+        "right_ny",
+    ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -179,7 +197,10 @@ def collect_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
             ear_min=args.gaze_ear_min,
         )
         if not ok:
-            print("Collection aborted (partial data may have been saved).", file=sys.stderr)
+            print(
+                "Collection aborted (partial data may have been saved).",
+                file=sys.stderr,
+            )
             return 1
     finally:
         detector.close()
