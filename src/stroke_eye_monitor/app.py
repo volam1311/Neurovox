@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 
 from stroke_eye_monitor.config import MonitorConfig, detect_screen_resolution
 from stroke_eye_monitor.detector import FaceMeshEyeDetector
@@ -198,7 +199,6 @@ def run(argv: list[str] | None = None) -> int:
     kb_w, kb_h = 0, 0
     if args.keyboard and gaze_cal is not None:
         from stroke_eye_monitor.keyboard_overlay import GazeKeyboard
-        import numpy as np
 
         screen = detect_screen_resolution()
         kb_w = screen[0] if screen else gaze_w
