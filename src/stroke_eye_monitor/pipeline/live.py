@@ -30,22 +30,19 @@ class KeyboardSession:
     blink: BlinkDetector
 
     @staticmethod
-    def open_fullscreen(gaze_cal: GazeCalibration) -> KeyboardSession:
-        win = "Gaze Keyboard"
-        screen = detect_screen_resolution()
-        kb_w = screen[0] if screen else gaze_cal.gaze_width
-        kb_h = screen[1] if screen else gaze_cal.gaze_height
+    def create_session(gaze_cal: GazeCalibration) -> KeyboardSession:
+        win = "Main Output"  # We'll just draw onto the main app window
+        
+        kb_w, kb_h = detect_screen_resolution() or (gaze_cal.gaze_width, gaze_cal.gaze_height)
 
         keyboard = GazeKeyboard()
-        keyboard.layout(gaze_cal.gaze_width, gaze_cal.gaze_height)
-        blink = BlinkDetector()
-
-        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(win, kb_w, kb_h)
-        try:
-            cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        except cv2.error:
-            pass
+        keyboard.layout(kb_w, kb_h)
+        blink = BlinkDetector(
+            close_threshold=0.12,
+            open_threshold=0.16,
+            min_closed_frames=1,
+            cooldown_frames=4,
+        )
 
         return KeyboardSession(
             window_name=win,
@@ -111,7 +108,9 @@ class LiveEyePipeline:
         style = DrawStyle.FULL if self._full_mesh else DrawStyle.EYES_ONLY
         draw_face_mesh_eyes(display, result.landmarks, style=style)
 
-        hud.append(f"EAR L {self._sm_l_ear:.3f}  R {self._sm_r_ear:.3f}  |d|: {self._sm_asym:.3f}")
+        hud.append(
+            f"EAR L {self._sm_l_ear:.3f}  R {self._sm_r_ear:.3f}  |d|: {self._sm_asym:.3f}"
+        )
         if self._sm_li and self._sm_ri:
             hud.append(
                 f"Iris offset L nx,ny {self._sm_li[0]:+.2f},{self._sm_li[1]:+.2f}  "
@@ -156,7 +155,6 @@ class LiveEyePipeline:
             kb_canvas,
             left_iris=self._sm_li,
             right_iris=self._sm_ri,
-            gaze_xy=gaze_pt,
         )
 
     def backspace_typed(self) -> None:
