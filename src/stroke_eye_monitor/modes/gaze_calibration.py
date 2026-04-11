@@ -93,7 +93,7 @@ def run_calibration(
                 m = compute_eye_metrics(result.landmarks, h0, w0)
                 # Skip blink/half-closed frames (a major source of jitter).
                 if m.left_ear >= ear_min and m.right_ear >= ear_min:
-                    g = gaze_feature_vector(m)
+                    g = gaze_feature_vector(m, result.face_matrix)
                     if g is not None:
                         collected.append(g.copy())
                 if len(collected) >= samples_per_point:

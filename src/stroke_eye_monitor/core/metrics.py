@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+import cv2
 import numpy as np
 
 
@@ -123,21 +124,43 @@ def compute_eye_metrics(landmarks: Sequence, h: int, w: int) -> EyeMetrics:
     )
 
 
+def head_pose_rvec(face_matrix: np.ndarray | None) -> np.ndarray:
+    """3-vector from the rotation block of MediaPipe's 4×4 face transform (axis–angle via Rodrigues).
+
+    Zeros when the matrix is missing or ill-conditioned.
+    """
+    if face_matrix is None:
+        return np.zeros(3, dtype=np.float64)
+    M = np.asarray(face_matrix, dtype=np.float64).reshape(4, 4)
+    R = M[:3, :3]
+    if not np.all(np.isfinite(R)):
+        return np.zeros(3, dtype=np.float64)
+    rvec, _ = cv2.Rodrigues(R)
+    v = rvec.reshape(3).astype(np.float64)
+    if not np.all(np.isfinite(v)):
+        return np.zeros(3, dtype=np.float64)
+    return v
+
+
 def gaze_feature_vector(
     m: EyeMetrics, face_matrix: np.ndarray | None = None
 ) -> np.ndarray | None:
     """
-    Feature row for calibrated gaze regression (eyes-only):
-    [Lnx, Lny, Rnx, Rny, 1].
+    Feature row for calibrated gaze regression (8-D):
+    [Lnx, Lny, Rnx, Rny, r0, r1, r2, 1]
 
-    Note: This is more sensitive to head motion than including face pose terms,
-    but it avoids the gaze dot following head translation.
+    ``(r0,r1,r2)`` is the Rodrigues vector of the 3×3 rotation from MediaPipe's
+    facial transformation matrix (canonical face → runtime face).
     """
     if m.left_iris_offset is None or m.right_iris_offset is None:
         return None
     lx, ly = m.left_iris_offset
     rx, ry = m.right_iris_offset
-    return np.array([lx, ly, rx, ry, 1.0], dtype=np.float64)
+    h = head_pose_rvec(face_matrix)
+    return np.array(
+        [lx, ly, rx, ry, float(h[0]), float(h[1]), float(h[2]), 1.0],
+        dtype=np.float64,
+    )
 
 
 class BlinkDetector:
