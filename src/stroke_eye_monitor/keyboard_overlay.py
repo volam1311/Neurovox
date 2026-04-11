@@ -27,7 +27,7 @@ class KeyboardCell:
 
 @dataclass
 class GazeKeyboard:
-    """26-cell alphabetical gaze keyboard (one letter per cell) with blink selection."""
+    """26-cell alphabetical gaze keyboard: gaze highlights a cell, blink commits the letter."""
 
     cells: list[KeyboardCell] = field(default_factory=list)
     typed: list[str] = field(default_factory=list)
@@ -37,7 +37,7 @@ class GazeKeyboard:
     _canvas_h: int = 0
 
     def layout(self, canvas_w: int, canvas_h: int) -> None:
-        """Compute cell pixel bounds for a given canvas size."""
+        """Compute cell pixel bounds for the full canvas."""
         self._canvas_w = canvas_w
         self._canvas_h = canvas_h
         row_h = canvas_h / ROWS
@@ -133,16 +133,19 @@ class GazeKeyboard:
         bar_h = 40
         font = cv2.FONT_HERSHEY_SIMPLEX
 
-        # Typed text bar at the top
+        hint = "Blink to select letter   |   D = backspace   |   Esc = quit"
+        cv2.rectangle(frame, (0, 0), (w, bar_h), (20, 20, 20), -1)
+        cv2.putText(frame, hint, (10, 26), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+
         typed_str = self.typed_text
         if typed_str:
-            cv2.rectangle(frame, (0, 0), (w, bar_h), (20, 20, 20), -1)
+            y2 = bar_h + 36
+            cv2.rectangle(frame, (0, bar_h), (w, y2), (15, 15, 15), -1)
             cv2.putText(
-                frame, typed_str, (10, 30),
-                font, 0.9, (0, 255, 200), 2, cv2.LINE_AA,
+                frame, typed_str, (10, y2 - 8),
+                font, 0.85, (0, 255, 200), 2, cv2.LINE_AA,
             )
 
-        # Iris coordinates + gaze point bar at the bottom
         coords_parts: list[str] = []
         if left_iris is not None:
             coords_parts.append(f"L({left_iris[0]:+.2f},{left_iris[1]:+.2f})")
