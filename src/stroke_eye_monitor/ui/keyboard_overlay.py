@@ -35,11 +35,13 @@ class GazeKeyboard:
     _active_cell: int = -1
     _canvas_w: int = 0
     _canvas_h: int = 0
+    _base_image: np.ndarray | None = field(default=None, repr=False, init=False)
 
     def layout(self, canvas_w: int, canvas_h: int) -> None:
         """Compute cell pixel bounds for the full canvas."""
         self._canvas_w = canvas_w
         self._canvas_h = canvas_h
+        self._base_image = None
         row_h = canvas_h / ROWS
         self.cells = []
         idx = 0
@@ -104,31 +106,49 @@ class GazeKeyboard:
         h, w = frame.shape[:2]
         sx = w / self._canvas_w
         sy = h / self._canvas_h
-        overlay = frame.copy()
 
-        for i, cell in enumerate(self.cells):
-            is_active = (i == self._active_cell)
+        # 1. Create a cached base image of the keyboard grid (only done once)
+        if self._base_image is None or self._base_image.shape[:2] != (h, w):
+            self._base_image = np.zeros((h, w, 3), dtype=np.uint8)
+            for cell in self.cells:
+                dx0 = int(round(cell.x0 * sx))
+                dy0 = int(round(cell.y0 * sy))
+                dx1 = int(round(cell.x1 * sx))
+                dy1 = int(round(cell.y1 * sy))
+
+                cv2.rectangle(self._base_image, (dx0, dy0), (dx1, dy1), (30, 30, 30), -1)
+                cv2.rectangle(self._base_image, (dx0, dy0), (dx1, dy1), (100, 100, 100), 2)
+
+                font = cv2.FONT_HERSHEY_DUPLEX
+                cell_px_w = dx1 - dx0
+                scale = max(0.55, min(1.5, cell_px_w / 72.0))
+                thickness = max(3, min(6, int(round(cell_px_w / 28.0))))
+                (tw, th), _ = cv2.getTextSize(cell.letter, font, scale, thickness)
+                tx = (dx0 + dx1) // 2 - tw // 2
+                ty = (dy0 + dy1) // 2 + th // 2
+                cv2.putText(self._base_image, cell.letter, (tx, ty), font, scale, (235, 235, 235), thickness, cv2.LINE_AA)
+
+        overlay = self._base_image.copy()
+
+        # 2. Draw only the active cell over the overlay
+        if 0 <= self._active_cell < len(self.cells):
+            cell = self.cells[self._active_cell]
             dx0 = int(round(cell.x0 * sx))
             dy0 = int(round(cell.y0 * sy))
             dx1 = int(round(cell.x1 * sx))
             dy1 = int(round(cell.y1 * sy))
 
-            bg_color = (80, 60, 20) if is_active else (30, 30, 30)
-            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), bg_color, -1)
-            border_color = (0, 220, 255) if is_active else (100, 100, 100)
-            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), border_color, 2)
+            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), (80, 60, 20), -1)
+            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), (0, 220, 255), 2)
 
             font = cv2.FONT_HERSHEY_DUPLEX
             cell_px_w = dx1 - dx0
             scale = max(0.55, min(1.5, cell_px_w / 72.0))
-            thickness = max(3, min(6, int(round(cell_px_w / 28.0))))
-            if is_active:
-                thickness = min(thickness + 1, 7)
+            thickness = min((max(3, min(6, int(round(cell_px_w / 28.0))))) + 1, 7)
             (tw, th), _ = cv2.getTextSize(cell.letter, font, scale, thickness)
             tx = (dx0 + dx1) // 2 - tw // 2
             ty = (dy0 + dy1) // 2 + th // 2
-            text_color = (0, 255, 255) if is_active else (235, 235, 235)
-            cv2.putText(overlay, cell.letter, (tx, ty), font, scale, text_color, thickness, cv2.LINE_AA)
+            cv2.putText(overlay, cell.letter, (tx, ty), font, scale, (0, 255, 255), thickness, cv2.LINE_AA)
 
         cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, dst=frame)
 
