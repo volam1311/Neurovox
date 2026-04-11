@@ -19,13 +19,17 @@ from stroke_eye_monitor.utils.fps import FpsMeter
 from stroke_eye_monitor.utils.threaded_capture import ThreadedVideoCapture
 
 
-def _load_gaze_calibration(args: argparse.Namespace) -> tuple[GazeCalibration | None, int]:
+def _load_gaze_calibration(
+    args: argparse.Namespace,
+) -> tuple[GazeCalibration | None, int]:
     """Load gaze JSON when ``--gaze``; return ``(calibration, exit_code)`` with ``exit_code`` 0 if ok."""
     if not args.gaze:
         return None, 0
     gp = Path(args.gaze_file)
     if not gp.is_file():
-        print(f"Gaze file not found: {gp}  (run with --calibrate first)", file=sys.stderr)
+        print(
+            f"Gaze file not found: {gp}  (run with --calibrate first)", file=sys.stderr
+        )
         return None, 1
     gaze_cal = GazeCalibration.load(gp)
     if gaze_cal.feature_dim != 8:
@@ -39,10 +43,12 @@ def _load_gaze_calibration(args: argparse.Namespace) -> tuple[GazeCalibration | 
     return gaze_cal, 0
 
 
-def _build_live_pipeline(args: argparse.Namespace, gaze_cal: GazeCalibration | None) -> LiveEyePipeline:
+def _build_live_pipeline(
+    args: argparse.Namespace, gaze_cal: GazeCalibration | None
+) -> LiveEyePipeline:
     kbd: KeyboardSession | None = None
     if args.keyboard and gaze_cal is not None:
-        kbd = KeyboardSession.open_fullscreen(gaze_cal)
+        kbd = KeyboardSession.create_session(gaze_cal)
 
     return LiveEyePipeline(
         gaze_file_label=args.gaze_file if args.gaze else None,
@@ -60,13 +66,29 @@ def run(argv: list[str] | None = None) -> int:
     if args.keyboard:
         args.gaze = True
 
+    from stroke_eye_monitor.config import detect_screen_resolution
+
+    screen_res = detect_screen_resolution()
+    target_width = screen_res[0] if screen_res else args.width
+
     cfg = MonitorConfig(
-        camera_index=args.camera,
-        process_width=args.width,
+        camera_index=1,
+        process_width=target_width,
         mirror_display=not args.no_mirror,
     )
 
     def proc_fn(frame: Any) -> Any:
+        # Scale the frame down or up so it fits exactly inside the screen bounds
+        if screen_res:
+            sw, sh = screen_res
+            fh, fw = frame.shape[:2]
+            scale = min(sw / fw, sh / fh)
+            nh, nw = int(round(fh * scale)), int(round(fw * scale))
+            return cv2.resize(
+                frame,
+                (nw, nh),
+                interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
+            )
         return letterbox_to_width(frame, cfg.process_width)
 
     if args.calibrate:
@@ -96,6 +118,12 @@ def run(argv: list[str] | None = None) -> int:
     pipeline = _build_live_pipeline(args, gaze_cal)
     fps_meter = FpsMeter()
     capture = ThreadedVideoCapture(cap)
+
+    cv2.namedWindow(cfg.window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(
+        cfg.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
+    )
+
     capture.start()
 
     try:
@@ -116,14 +144,27 @@ def run(argv: list[str] | None = None) -> int:
             display = proc
             hud_lines = pipeline.step(display, result)
 
-            if pipeline.keyboard_session is not None:
-                ks = pipeline.keyboard_session
-                kb_canvas = np.zeros((ks.pixel_h, ks.pixel_w, 3), dtype=np.uint8)
-                pipeline.draw_keyboard(kb_canvas)
-                cv2.imshow(ks.window_name, kb_canvas)
-
             if cfg.mirror_display:
                 display = cv2.flip(display, 1)
+
+            # Center the camera frame on a full-screen canvas before drawing the UI
+            if screen_res is not None:
+                sw, sh = screen_res
+                fh, fw = display.shape[:2]
+
+                # Create a black background to match the OS resolution exactly
+                canvas = np.zeros((sh, sw, 3), dtype=np.uint8)
+
+                # Center the camera image inside the canvas
+                dx = (sw - fw) // 2
+                dy = (sh - fh) // 2
+
+                if dx >= 0 and dy >= 0:
+                    canvas[dy : dy + fh, dx : dx + fw] = display
+                else:
+                    canvas = cv2.resize(display, (sw, sh))
+
+                display = canvas
 
             draw_hud(
                 display,
@@ -132,6 +173,10 @@ def run(argv: list[str] | None = None) -> int:
                 face_ok=result.landmarks is not None,
                 lines=hud_lines,
             )
+
+            # Overlay keyboard directly onto the webcam feed (after mirror flip!)
+            if pipeline.keyboard_session is not None:
+                pipeline.draw_keyboard(display)
 
             cv2.imshow(cfg.window_name, display)
             key = cv2.waitKey(1) & 0xFF

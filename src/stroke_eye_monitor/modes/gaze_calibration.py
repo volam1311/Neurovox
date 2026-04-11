@@ -60,7 +60,10 @@ def run_calibration(
     for idx, (fx, fy) in enumerate(t_list):
         tx = int(round(fx * (gaze_width - 1)))
         ty = int(round(fy * (gaze_height - 1)))
-        print(f"Point {idx + 1}/{len(t_list)}: look at the dot, hold still, press SPACE", flush=True)
+        print(
+            f"Point {idx + 1}/{len(t_list)}: look at the dot, hold still, press SPACE",
+            flush=True,
+        )
 
         collecting = False
         collected: list[np.ndarray] = []
