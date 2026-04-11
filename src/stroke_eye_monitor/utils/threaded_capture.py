@@ -10,7 +10,7 @@ import cv2
 class ThreadedVideoCapture:
     """Background thread reads ``VideoCapture``; main thread consumes frames.
 
-    Uses a thread-safe variable so if inference/UI is slower than the camera, 
+    Uses a thread-safe variable so if inference/UI is slower than the camera,
     stale frames are dropped and you keep the most recent image (lower latency).
     """
 
@@ -18,8 +18,9 @@ class ThreadedVideoCapture:
         self._cap = cap
 
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._frame_id = 0
         self._latest_item: tuple[bool, Any] | None = None
-        self._new_frame_event = threading.Event()
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -41,32 +42,41 @@ class ThreadedVideoCapture:
                 # Force a robust copy so memory isn't shared with OpenCV C++
                 frame = frame.copy()
 
-            with self._lock:
+            with self._cond:
                 self._latest_item = (ok, frame)
-
-            self._new_frame_event.set()  # Signal that data is ready
+                self._frame_id += 1
+                self._cond.notify_all()
 
             if not ok:
-                # If camera died, stop the thread.
-                # Main thread will read ok=False and handle the crash.
-                break
+                # Transient camera read failures can occur on some backends.
+                # The failed read has been published to the consumer above.
+                # Now sleep briefly and retry unless the capture has been explicitly stopped.
+                time.sleep(0.05)
+                continue
 
     def read(self, timeout: float = 0.5) -> tuple[bool, Any]:
         """Block up to ``timeout`` seconds for the next frame."""
-        # Wait until the background thread signals a frame is ready
-        if self._new_frame_event.wait(timeout=timeout):
-            self._new_frame_event.clear()  # Reset for the next frame
-            
-            with self._lock:
-                # Add fallback to satisfy type checker
-                if self._latest_item is not None:
-                    return self._latest_item
-                return False, None
-        else:
+        with self._cond:
+            current_id = self._frame_id
+
+            # wait_for blocks until the lambda returns True or the timeout is reached
+            new_frame_arrived = self._cond.wait_for(
+                lambda: self._frame_id > current_id or self._stop.is_set(),
+                timeout=timeout,
+            )
+
+            if new_frame_arrived and self._latest_item is not None:
+                return self._latest_item
+
             return False, None  # Timed out waiting for camera
 
     def stop(self) -> None:
         self._stop.set()
+
+        # Wake up any thread waiting in read() so it can exit gracefully
+        with self._cond:
+            self._cond.notify_all()
+
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None

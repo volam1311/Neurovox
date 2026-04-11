@@ -21,3 +21,5 @@ models/*.part
 gaze_calibration.json
 .env
 gaze_data*.csv
+.vscode/
+tests/
