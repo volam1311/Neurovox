@@ -7,30 +7,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from stroke_eye_monitor.config import MonitorConfig
-from stroke_eye_monitor.detector import FaceMeshEyeDetector
-from stroke_eye_monitor.gaze_mapping import GazeCalibration, fit_affine_gaze
-from stroke_eye_monitor.metrics import compute_eye_metrics, gaze_feature_vector
-
-# Fractions of gaze canvas (helps cover the screen).
-def _sync_canvas_to_opencv_window(win: str, gw: int, gh: int) -> tuple[int, int]:
-    """Use the real OpenCV client size after fullscreen (fixes many Retina / scaling mismatches)."""
-    board = np.zeros((max(gh, 1), max(gw, 1), 3), dtype=np.uint8)
-    cv2.imshow(win, board)
-    best_w, best_h = gw, gh
-    for _ in range(60):
-        cv2.waitKey(16)
-        r = cv2.getWindowImageRect(win)
-        cw, ch = int(r[2]), int(r[3])
-        if cw >= 320 and ch >= 240:
-            best_w, best_h = cw, ch
-            break
-    print(
-        f"Calibration canvas (OpenCV window): {best_w} x {best_h}",
-        flush=True,
-    )
-    return best_w, best_h
-
+from stroke_eye_monitor.config import MonitorConfig, detect_screen_resolution
+from stroke_eye_monitor.core.detector import FaceMeshEyeDetector
+from stroke_eye_monitor.core.gaze_mapping import GazeCalibration, fit_affine_gaze
+from stroke_eye_monitor.core.metrics import compute_eye_metrics, gaze_feature_vector
+from stroke_eye_monitor.utils.opencv_canvas import sync_opencv_window_canvas
 
 # 12-point grid: 4x3 (columns x rows), row-major.
 _COL_FRAC = (0.08, 0.36, 0.64, 0.92)
@@ -67,7 +48,11 @@ def run_calibration(
     except cv2.error:
         pass
 
-    gaze_width, gaze_height = _sync_canvas_to_opencv_window(win, gaze_width, gaze_height)
+    gaze_width, gaze_height = sync_opencv_window_canvas(win, gaze_width, gaze_height)
+    print(
+        f"Calibration canvas (OpenCV window): {gaze_width} x {gaze_height}",
+        flush=True,
+    )
 
     feature_rows: list[np.ndarray] = []
     screen_xy: list[tuple[float, float]] = []
@@ -142,8 +127,6 @@ def run_calibration(
 
 
 def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
-    from stroke_eye_monitor.config import detect_screen_resolution
-
     gw = args.gaze_width
     gh = args.gaze_height
 

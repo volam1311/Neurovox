@@ -118,14 +118,16 @@ class GazeKeyboard:
             border_color = (0, 220, 255) if is_active else (100, 100, 100)
             cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), border_color, 2)
 
-            font = cv2.FONT_HERSHEY_SIMPLEX
+            font = cv2.FONT_HERSHEY_DUPLEX
             cell_px_w = dx1 - dx0
-            scale = max(0.5, min(1.4, cell_px_w / 80.0))
-            thickness = 2
+            scale = max(0.55, min(1.5, cell_px_w / 72.0))
+            thickness = max(3, min(6, int(round(cell_px_w / 28.0))))
+            if is_active:
+                thickness = min(thickness + 1, 7)
             (tw, th), _ = cv2.getTextSize(cell.letter, font, scale, thickness)
             tx = (dx0 + dx1) // 2 - tw // 2
             ty = (dy0 + dy1) // 2 + th // 2
-            text_color = (0, 255, 255) if is_active else (220, 220, 220)
+            text_color = (0, 255, 255) if is_active else (235, 235, 235)
             cv2.putText(overlay, cell.letter, (tx, ty), font, scale, text_color, thickness, cv2.LINE_AA)
 
         cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, dst=frame)
@@ -143,7 +145,7 @@ class GazeKeyboard:
             cv2.rectangle(frame, (0, bar_h), (w, y2), (15, 15, 15), -1)
             cv2.putText(
                 frame, typed_str, (10, y2 - 8),
-                font, 0.85, (0, 255, 200), 2, cv2.LINE_AA,
+                font, 0.9, (0, 255, 200), 3, cv2.LINE_AA,
             )
 
         coords_parts: list[str] = []

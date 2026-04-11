@@ -192,16 +192,22 @@ Calibration files include `version` and `feature_dim`; the app expects **`featur
 
 | Path | Role |
 |------|------|
-| `src/stroke_eye_monitor/app.py` | CLI, camera loop, gaze, keyboard window |
-| `src/stroke_eye_monitor/detector.py` | Face Landmarker (VIDEO) |
-| `src/stroke_eye_monitor/metrics.py` | EAR, iris offsets, gaze feature vector, smoothing, `BlinkDetector` |
-| `src/stroke_eye_monitor/drawing.py` | OpenCV overlays |
-| `src/stroke_eye_monitor/assets.py` | Model download (`certifi` for HTTPS) |
-| `src/stroke_eye_monitor/gaze_mapping.py` | `GazeCalibration`, ridge `fit_affine_gaze` |
-| `src/stroke_eye_monitor/gaze_calibration.py` | 12-point calibration UI |
-| `src/stroke_eye_monitor/keyboard_overlay.py` | 26-key grid + drawing |
-| `src/stroke_eye_monitor/data_collection.py` | `--collect` random targets → CSV |
+| `src/stroke_eye_monitor/app.py` | Entry: dispatch `--calibrate` / `--collect` / live loop |
+| `src/stroke_eye_monitor/cli_args.py` | `argparse` definitions |
 | `src/stroke_eye_monitor/config.py` | `MonitorConfig`, `detect_screen_resolution()` (macOS) |
+| `src/stroke_eye_monitor/core/detector.py` | Face Landmarker (VIDEO) |
+| `src/stroke_eye_monitor/core/metrics.py` | EAR, iris offsets, gaze feature vector, smoothing, `BlinkDetector` |
+| `src/stroke_eye_monitor/core/gaze_mapping.py` | `GazeCalibration`, ridge `fit_affine_gaze` |
+| `src/stroke_eye_monitor/core/assets.py` | Model download (`certifi` for HTTPS) |
+| `src/stroke_eye_monitor/ui/drawing.py` | Face mesh / HUD overlays |
+| `src/stroke_eye_monitor/ui/keyboard_overlay.py` | 26-key grid + drawing |
+| `src/stroke_eye_monitor/pipeline/live.py` | `LiveEyePipeline` (per-frame metrics → gaze → keyboard) |
+| `src/stroke_eye_monitor/modes/gaze_calibration.py` | 12-point calibration UI |
+| `src/stroke_eye_monitor/modes/data_collection.py` | `--collect` random targets → CSV |
+| `src/stroke_eye_monitor/utils/frame.py` | Letterbox resize before inference |
+| `src/stroke_eye_monitor/utils/opencv_canvas.py` | Fullscreen window size sync |
+| `src/stroke_eye_monitor/utils/fps.py` | Rolling FPS estimate |
+| `src/stroke_eye_monitor/utils/threaded_capture.py` | Background camera read → queue; main thread runs inference + UI |
 | `models/` | `face_landmarker.task` (downloaded; not committed) |
 | `gaze_calibration.json` | Your calibration (gitignored in `.gitignore`) |
 | `gaze_data*.csv` | Collection output (gitignored) |

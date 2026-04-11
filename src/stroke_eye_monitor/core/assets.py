@@ -15,7 +15,8 @@ MODEL_NAME = "face_landmarker.task"
 
 
 def default_model_path() -> Path:
-    root = Path(__file__).resolve().parents[2]
+    # .../AIML/src/stroke_eye_monitor/core/assets.py -> repo root is parents[3]
+    root = Path(__file__).resolve().parents[3]
     return root / "models" / MODEL_NAME
 
 
