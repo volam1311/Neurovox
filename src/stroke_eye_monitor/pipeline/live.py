@@ -120,7 +120,7 @@ class LiveEyePipeline:
 
         if self._gaze_cal is not None:
             if m.left_ear >= self._gaze_ear_min and m.right_ear >= self._gaze_ear_min:
-                g = gaze_feature_vector(m)
+                g = gaze_feature_vector(m, result.face_matrix)
             else:
                 g = None
             if g is not None:

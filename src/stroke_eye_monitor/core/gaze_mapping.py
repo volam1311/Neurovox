@@ -16,10 +16,10 @@ class GazeCalibration:
     gaze_height: int
     coeff_x: list[float]
     coeff_y: list[float]
-    feature_dim: int = 5
+    feature_dim: int = 8
 
     def predict(self, features: np.ndarray) -> tuple[float, float]:
-        """features length must match feature_dim (default 5: iris offsets + bias)."""
+        """features length must match ``feature_dim`` (default 8: iris + head Rodrigues + bias)."""
         f = np.asarray(features, dtype=np.float64).reshape(-1)
         if f.shape[0] != self.feature_dim:
             raise ValueError(f"Expected {self.feature_dim} features, got {f.shape[0]}")
@@ -35,7 +35,7 @@ class GazeCalibration:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": 5,
+            "version": 6,
             "gaze_width": self.gaze_width,
             "gaze_height": self.gaze_height,
             "coeff_x": self.coeff_x,
@@ -45,7 +45,7 @@ class GazeCalibration:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GazeCalibration:
-        fd = int(d.get("feature_dim", 5))
+        fd = int(d.get("feature_dim", 8))
         return cls(
             gaze_width=int(d["gaze_width"]),
             gaze_height=int(d["gaze_height"]),

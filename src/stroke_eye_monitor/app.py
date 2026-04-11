@@ -28,10 +28,11 @@ def _load_gaze_calibration(args: argparse.Namespace) -> tuple[GazeCalibration | 
         print(f"Gaze file not found: {gp}  (run with --calibrate first)", file=sys.stderr)
         return None, 1
     gaze_cal = GazeCalibration.load(gp)
-    if gaze_cal.feature_dim != 5:
+    if gaze_cal.feature_dim != 8:
         print(
-            "This gaze_calibration.json doesn't match the current eyes-only gaze model. "
-            "Run --calibrate again to regenerate (expects 5 features: iris offsets + bias).",
+            "This gaze_calibration.json doesn't match the current gaze model. "
+            "Run --calibrate again to regenerate (expects 8 features: iris offsets, "
+            "head rotation Rodrigues vector, bias).",
             file=sys.stderr,
         )
         return None, 1

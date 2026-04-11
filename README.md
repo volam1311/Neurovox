@@ -109,7 +109,7 @@ Rough alignment with a multi-phase AAC-style pipeline:
 
 3. **HUD:** FPS, inference time, face lock, smoothed **EAR**, **asymmetry** $\lvert L - R \rvert$, **iris offsets**, and optional **gaze** text.
 
-4. **Optional gaze:** A **ridge-regularized affine** map from a **5-D feature vector** (eyes-only) to $(g_x, g_y)$ on the calibration canvas, then exponential smoothing and clamping.
+4. **Optional gaze:** A **ridge-regularized affine** map from an **8-D feature vector** (iris offsets + head rotation + bias) to $(g_x, g_y)$ on the calibration canvas, then exponential smoothing and clamping.
 
 5. **Optional keyboard:** Same gaze point drives `hit_test` on the keyboard layout; **BlinkDetector** fires on reopening after a short EAR drop to call `select()`.
 
@@ -152,12 +152,14 @@ $$
 
 (and similarly for the 2D iris offset vector).
 
-### Calibrated gaze (eyes-only, ridge regression)
+### Calibrated gaze (iris + head pose, ridge regression)
 
-**Feature vector** (length **5**):
+MediaPipe also outputs a **4×4 facial transformation matrix** (canonical face → current frame). Let $R \in \mathbb{R}^{3\times 3}$ be its rotation block and $\mathbf{r} \in \mathbb{R}^3$ the **Rodrigues** vector for $R$ (same convention as OpenCV’s `Rodrigues`: axis–angle encoding).
+
+**Feature vector** (length **8**):
 
 $$
-\mathbf{f} = [\,L_{nx},\; L_{ny},\; R_{nx},\; R_{ny},\; 1\,]^\top
+\mathbf{f} = [\,L_{nx},\; L_{ny},\; R_{nx},\; R_{ny},\; r_0,\; r_1,\; r_2,\; 1\,]^\top
 $$
 
 At each calibration dot $(s_x, s_y)$ on the gaze canvas, frames with both eyes above `--gaze-ear-min` contribute samples; the stored row is the **per-coordinate median** across frames (robust to spikes). Then two separate ridge fits:
@@ -169,7 +171,7 @@ $$
 
 with $\lambda =$ `--gaze-ridge`. At runtime: $\hat{g}_x = \mathbf{w}_x^\top\mathbf{f}$, $\hat{g}_y = \mathbf{w}_y^\top\mathbf{f}$, then smoothing and clamp to the canvas stored in the JSON.
 
-Calibration files include `version` and `feature_dim`; the app expects **`feature_dim == 5`** for this eyes-only model.
+Calibration files include `version` (written as **6** for this schema) and `feature_dim`; the app expects **`feature_dim == 8`**. Older 5-D calibrations must be regenerated with `--calibrate`.
 
 ### Blink detection (keyboard)
 
