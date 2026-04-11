@@ -1,4 +1,4 @@
-# Webcam eye & gaze (research demo)
+# Webcam eye (research demo)
 
 Live **eye and iris** tracking from a webcam using **MediaPipe Face Landmarker**, with optional **per-user gaze calibration**, a **fullscreen gaze keyboard** (blink to type), and a **data-collection** mode for exporting iris features vs. on-screen targets to CSV.
 
@@ -213,11 +213,19 @@ Calibration files include `version` (written as **6** for this schema) and `feat
 | `models/` | `face_landmarker.task` (downloaded; not committed) |
 | `gaze_calibration.json` | Your calibration (gitignored in `.gitignore`) |
 | `gaze_data*.csv` | Collection output (gitignored) |
+| `src/LLM/` | Optional completion layer (`EchoBackend`, `OpenAICompletion`) |
 
 ## Requirements
 
 - Python **3.10+**
-- Dependencies: `pyproject.toml` / `requirements.txt` — MediaPipe, OpenCV, NumPy, certifi.
+- Dependencies: `pyproject.toml` / `requirements.txt` — MediaPipe, OpenCV, NumPy, certifi, **openai**, **python-dotenv**.
+
+### LLM (OpenAI)
+
+- Put **`OPENAI_API_KEY`** in a repo-root **`.env`** (gitignored) or export it in the shell.
+- Optional: **`OPENAI_MODEL`** (default `gpt-4o-mini`), **`OPENAI_BASE_URL`** (compatible proxies / Azure-style endpoints).
+- Use `OpenAICompletion` after `pip install -e .`: pass the **chatbot’s `question`** and the person’s **short `reply`** (e.g. `WDYM`, `IMFTK`); `complete_ranked(..., k=5)` returns ranked plain-English interpretations (not wired into the gaze keyboard UI yet).
+- CLI: `PYTHONPATH=src python -m LLM "Chatbot question here" "USERREPLY"`.
 
 ## License
 
