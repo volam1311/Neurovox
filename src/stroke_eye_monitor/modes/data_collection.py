@@ -10,22 +10,9 @@ import cv2
 import numpy as np
 
 from stroke_eye_monitor.config import MonitorConfig, detect_screen_resolution
-from stroke_eye_monitor.detector import FaceMeshEyeDetector
-from stroke_eye_monitor.metrics import compute_eye_metrics
-
-
-def _sync_canvas(win: str, gw: int, gh: int) -> tuple[int, int]:
-    board = np.zeros((max(gh, 1), max(gw, 1), 3), dtype=np.uint8)
-    cv2.imshow(win, board)
-    best_w, best_h = gw, gh
-    for _ in range(60):
-        cv2.waitKey(16)
-        r = cv2.getWindowImageRect(win)
-        cw, ch = int(r[2]), int(r[3])
-        if cw >= 320 and ch >= 240:
-            best_w, best_h = cw, ch
-            break
-    return best_w, best_h
+from stroke_eye_monitor.core.detector import FaceMeshEyeDetector
+from stroke_eye_monitor.core.metrics import compute_eye_metrics
+from stroke_eye_monitor.utils.opencv_canvas import sync_opencv_window_canvas
 
 
 def _generate_random_targets(n: int, margin: float = 0.08) -> list[tuple[float, float]]:
@@ -62,7 +49,7 @@ def run_collection(
     except cv2.error:
         pass
 
-    canvas_width, canvas_height = _sync_canvas(win, canvas_width, canvas_height)
+    canvas_width, canvas_height = sync_opencv_window_canvas(win, canvas_width, canvas_height)
     print(f"Canvas: {canvas_width} x {canvas_height}", flush=True)
 
     rows: list[dict[str, object]] = []

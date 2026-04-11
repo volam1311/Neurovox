@@ -6,6 +6,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
+
 def _lm_xy(
     landmarks: Sequence, h: int, w: int, idx: int
 ) -> tuple[float, float]:

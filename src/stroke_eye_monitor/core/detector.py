@@ -13,8 +13,8 @@ from mediapipe.tasks.python.vision import face_landmarker as fl_module
 from mediapipe.tasks.python.vision.core import image as mp_image_module
 from mediapipe.tasks.python.vision.core import vision_task_running_mode as running_mode_module
 
-from stroke_eye_monitor.assets import ensure_face_landmarker_model
 from stroke_eye_monitor.config import MonitorConfig
+from stroke_eye_monitor.core.assets import ensure_face_landmarker_model
 
 NormalizedLandmark = landmark_lib.NormalizedLandmark
 
