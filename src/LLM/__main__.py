@@ -1,4 +1,4 @@
-"""Smoke-test: chatbot ``question`` + user ``reply`` → top 5 ranked interpretations.
+"""Smoke-test: chatbot ``question`` + person's short ``reply`` → top 5 ranked **full replies** they might intend (joint context).
 
 Examples:
   PYTHONPATH=src python -m LLM "How are you feeling today?" "IMFTK"
@@ -17,7 +17,7 @@ def main() -> None:
     if len(argv) >= 2:
         question, reply = argv[0], " ".join(argv[1:])
     else:
-        question = input("Chatbot question: ").strip()
+        question = input("Question: ").strip()
         reply = input("User short reply (e.g. WDYM, IMFTK): ").strip()
     if not question or not reply:
         print("Need both a question and a reply.", file=sys.stderr)
