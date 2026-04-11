@@ -41,9 +41,9 @@ On **macOS**, `--calibrate` and `--collect` try to detect your **primary display
 | `--gaze-file PATH` | Calibration JSON (default `gaze_calibration.json`) |
 | `--gaze-width` / `--gaze-height` | Fallback canvas size if screen detection fails (defaults `1280×720`) |
 | `--gaze-samples` | Frames collected per dot after **Space** (default `45`) |
-| `--gaze-alpha` | Smoothing for gaze \([0,1]\), higher = snappier (default `0.25`) |
+| `--gaze-alpha` | Smoothing for gaze $[0,1]$, higher = snappier (default `0.25`) |
 | `--gaze-ear-min` | Skip frames where either eye EAR is below this (blink / low quality; default `0.17`) |
-| `--gaze-ridge` | Ridge \(\lambda\) for the calibration fit (default `1e-2`) |
+| `--gaze-ridge` | Ridge $\lambda$ for the calibration fit (default `1e-2`) |
 | **Runtime gaze** | |
 | `--gaze` | Load calibration; compute gaze and show **HUD** lines (iris offsets, gaze x/y) |
 | **Keyboard** | |
@@ -72,14 +72,14 @@ Requires a calibration file from step 1:
 stroke-eye-monitor --gaze --gaze-file gaze_calibration.json
 ```
 
-The **camera** window shows the face overlay and a HUD with EAR, iris offsets \((n_x,n_y)\), and smoothed **gaze** \((g_x,g_y)\) in **calibration canvas** coordinates. There is **no** on-video gaze dot by default.
+The **camera** window shows the face overlay and a HUD with EAR, iris offsets $(n_x, n_y)$, and smoothed **gaze** $(g_x, g_y)$ in **calibration canvas** coordinates. There is **no** on-video gaze dot by default.
 
 ### 3. Gaze keyboard (`--keyboard`)
 
 Requires calibration. Opens:
 
 - **Camera window** — face + metrics (same as `--gaze`).
-- **Fullscreen keyboard** — 26 letters (rows \(7{+}7{+}7{+}5\)). **Look** at a cell to highlight it; **blink** to append that letter. **D** deletes the last character.
+- **Fullscreen keyboard** — 26 letters (rows $7{+}7{+}7{+}5$). **Look** at a cell to highlight it; **blink** to append that letter. **D** deletes the last character.
 
 Typed text is printed when you quit if non-empty.
 
@@ -95,7 +95,7 @@ Rough alignment with a multi-phase AAC-style pipeline:
 
 | Phase (concept) | This repo |
 |-----------------|-----------|
-| Capture (camera → iris → screen coords) | **Yes** — MediaPipe + optional calibration → \((g_x,g_y)\). |
+| Capture (camera → iris → screen coords) | **Yes** — MediaPipe + optional calibration → $(g_x, g_y)$. |
 | Keyboard UI | **Yes** — fullscreen grid; highlight from gaze. |
 | “Type initials” (compose letters) | **Yes** — **blink** commits the focused letter (not 3 s dwell per key). |
 | “Confirm / done” (e.g. 3 s dwell) | **Not implemented** — you finish with **Esc**; no separate dwell-to-confirm strip. |
@@ -103,13 +103,13 @@ Rough alignment with a multi-phase AAC-style pipeline:
 
 ## What the app does (runtime pipeline)
 
-1. **Sensing:** **MediaPipe Face Landmarker** (video mode) outputs **478** landmarks (468 face + 10 iris when iris refine is on). Landmarks are normalized \([0,1]\); metrics use pixel coordinates \((xW,\,yH)\) for the processed frame size.
+1. **Sensing:** **MediaPipe Face Landmarker** (video mode) outputs **478** landmarks (468 face + 10 iris when iris refine is on). Landmarks are normalized $[0,1]$; metrics use pixel coordinates $(xW,\,yH)$ for the processed frame size.
 
 2. **Drawing:** **OpenCV** draws eye/iris polylines from MediaPipe’s task API topology (`drawing.py`).
 
-3. **HUD:** FPS, inference time, face lock, smoothed **EAR**, **asymmetry** \(|L-R|\), **iris offsets**, and optional **gaze** text.
+3. **HUD:** FPS, inference time, face lock, smoothed **EAR**, **asymmetry** $\lvert L - R \rvert$, **iris offsets**, and optional **gaze** text.
 
-4. **Optional gaze:** A **ridge-regularized affine** map from a **5-D feature vector** (eyes-only) to \((g_x,g_y)\) on the calibration canvas, then exponential smoothing and clamping.
+4. **Optional gaze:** A **ridge-regularized affine** map from a **5-D feature vector** (eyes-only) to $(g_x, g_y)$ on the calibration canvas, then exponential smoothing and clamping.
 
 5. **Optional keyboard:** Same gaze point drives `hit_test` on the keyboard layout; **BlinkDetector** fires on reopening after a short EAR drop to call `select()`.
 
@@ -117,38 +117,38 @@ Rough alignment with a multi-phase AAC-style pipeline:
 
 ### Normalized landmarks to pixels
 
-\[
+$$
 X = x\,W,\quad Y = y\,H
-\]
+$$
 
-Euclidean distance \(d\) between points.
+Euclidean distance $d$ between points.
 
 ### Eye Aspect Ratio (EAR)
 
 Six points per eye:
 
-\[
+$$
 \mathrm{EAR} = \frac{d(p_1,p_5) + d(p_2,p_4)}{2\,d(p_0,p_3)}
-\]
+$$
 
 Higher ⇒ more open; lower ⇒ blink / squint / noise.
 
 ### Iris offset (in-eye, normalized)
 
-Iris center \(c\), eye corners outer/inner, eye width \(w_{\mathrm{eye}}\), midpoint \(m\):
+Iris center $c$, eye corners outer/inner, eye width $w_{\mathrm{eye}}$, midpoint $m$:
 
-\[
+$$
 n_x = \frac{c_x - m_x}{w_{\mathrm{eye}}/2},\quad
 n_y = \frac{c_y - m_y}{w_{\mathrm{eye}}/2}
-\]
+$$
 
-Roughly in \([-1,1]\) when geometry is well-behaved; these are **image-plane** features, not raw monitor gaze until combined with calibration.
+Roughly in $[-1,1]$ when geometry is well-behaved; these are **image-plane** features, not raw monitor gaze until combined with calibration.
 
 ### Temporal smoothing
 
-\[
+$$
 s_t = \alpha x_t + (1-\alpha)\,s_{t-1}
-\]
+$$
 
 (and similarly for the 2D iris offset vector).
 
@@ -156,18 +156,18 @@ s_t = \alpha x_t + (1-\alpha)\,s_{t-1}
 
 **Feature vector** (length **5**):
 
-\[
+$$
 \mathbf{f} = [\,L_{nx},\; L_{ny},\; R_{nx},\; R_{ny},\; 1\,]^\top
-\]
+$$
 
-At each calibration dot \((s_x,s_y)\) on the gaze canvas, frames with both eyes above `--gaze-ear-min` contribute samples; the stored row is the **per-coordinate median** across frames (robust to spikes). Then two separate ridge fits:
+At each calibration dot $(s_x, s_y)$ on the gaze canvas, frames with both eyes above `--gaze-ear-min` contribute samples; the stored row is the **per-coordinate median** across frames (robust to spikes). Then two separate ridge fits:
 
-\[
+$$
 \min_{\mathbf{w}_x}\; \|\mathbf{F}\mathbf{w}_x - \mathbf{s}_x\|^2 + \lambda\|\mathbf{w}_x\|^2,\qquad
 \min_{\mathbf{w}_y}\; \|\mathbf{F}\mathbf{w}_y - \mathbf{s}_y\|^2 + \lambda\|\mathbf{w}_y\|^2
-\]
+$$
 
-with \(\lambda =\) `--gaze-ridge`. At runtime: \(\hat{g}_x = \mathbf{w}_x^\top\mathbf{f}\), \(\hat{g}_y = \mathbf{w}_y^\top\mathbf{f}\), then smoothing and clamp to the canvas stored in the JSON.
+with $\lambda =$ `--gaze-ridge`. At runtime: $\hat{g}_x = \mathbf{w}_x^\top\mathbf{f}$, $\hat{g}_y = \mathbf{w}_y^\top\mathbf{f}$, then smoothing and clamp to the canvas stored in the JSON.
 
 Calibration files include `version` and `feature_dim`; the app expects **`feature_dim == 5`** for this eyes-only model.
 
@@ -214,7 +214,3 @@ Calibration files include `version` and `feature_dim`; the app expects **`featur
 ## License
 
 Software is licensed under the **MIT License** — see [LICENSE](LICENSE). You may replace the copyright line in `LICENSE` with your name or organization.
-
-## Disclaimer
-
-Use at your own risk for **non-clinical** experiments. **Do not** use this software to diagnose stroke or other emergencies; call emergency services and seek professional care when appropriate.
