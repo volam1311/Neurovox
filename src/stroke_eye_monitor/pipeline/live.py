@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+from stroke_eye_monitor.audio_voice import SpokenContextBuffer
 
 from stroke_eye_monitor.config import detect_screen_resolution
 from stroke_eye_monitor.core.detector import FrameResult
@@ -15,8 +18,11 @@ from stroke_eye_monitor.core.metrics import (
     smooth_exponential,
     smooth_vec2,
 )
+
 from stroke_eye_monitor.ui.drawing import DrawStyle, draw_face_mesh_eyes
 from stroke_eye_monitor.ui.keyboard_overlay import GazeKeyboard
+from LLM.completion import CompletionBackend
+import threading
 
 
 @dataclass
@@ -30,7 +36,14 @@ class KeyboardSession:
     blink: BlinkDetector
 
     @staticmethod
-    def create_session(gaze_cal: GazeCalibration) -> KeyboardSession:
+    def create_session(
+        gaze_cal: GazeCalibration,
+        *,
+        on_sentence_chosen: Callable[[str], None] | None = None,
+        blink_close: float = 0.12,
+        blink_open: float = 0.16,
+        spoken_buffer: SpokenContextBuffer | None = None,
+    ) -> KeyboardSession:
         win = "Main Output"  # We'll just draw onto the main app window
 
         kb_w, kb_h = detect_screen_resolution() or (
@@ -38,11 +51,15 @@ class KeyboardSession:
             gaze_cal.gaze_height,
         )
 
-        keyboard = GazeKeyboard()
+        keyboard = GazeKeyboard(
+            dwell_seconds=gaze_cal.dwell_ms / 1000.0,
+            on_sentence_chosen=on_sentence_chosen,
+            spoken_buffer=spoken_buffer,
+        )
         keyboard.layout(kb_w, kb_h)
         blink = BlinkDetector(
-            close_threshold=0.12,
-            open_threshold=0.16,
+            close_threshold=blink_close,
+            open_threshold=blink_open,
             min_closed_frames=1,
             cooldown_frames=4,
         )
@@ -57,7 +74,7 @@ class KeyboardSession:
 
 
 class LiveEyePipeline:
-    """Per-frame processing: landmarks → metrics → optional gaze → optional keyboard."""
+    """Per-frame processing: landmarks -> metrics -> optional gaze -> optional keyboard."""
 
     def __init__(
         self,
@@ -69,6 +86,8 @@ class LiveEyePipeline:
         full_mesh: bool,
         keyboard: KeyboardSession | None,
         metric_smooth_alpha: float = 0.35,
+        llm_backend: CompletionBackend | None = None,
+        spoken_buffer: SpokenContextBuffer | None = None,
     ) -> None:
         self._gaze_file_label = gaze_file_label
         self._gaze_cal = gaze_cal
@@ -77,6 +96,9 @@ class LiveEyePipeline:
         self._full_mesh = full_mesh
         self._kbd = keyboard
         self._alpha = metric_smooth_alpha
+        self.llm_backend = llm_backend
+        self._spoken_buffer = spoken_buffer
+        self._llm_lock = threading.Lock()
 
         self._sm_l_ear = 0.25
         self._sm_r_ear = 0.25
@@ -90,9 +112,33 @@ class LiveEyePipeline:
     def keyboard_session(self) -> KeyboardSession | None:
         return self._kbd
 
+    def _fire_llm(self, abbreviated: str, prior_turns: list[str]) -> None:
+        """Run LLM expansion in a background thread with error recovery."""
+        kb = self._kbd
+        if kb is None:
+            return
+        try:
+            assert self.llm_backend is not None
+            spoken = None
+            if self._spoken_buffer is not None:
+                spoken = self._spoken_buffer.get_for_llm()
+            suggestions = self.llm_backend.complete_ranked(
+                abbreviated=abbreviated,
+                history=prior_turns if prior_turns else None,
+                spoken_context=spoken,
+                k=3,
+            )
+            with self._llm_lock:
+                kb.keyboard.set_suggestions(suggestions)
+        except Exception as exc:
+            print(f"LLM error: {exc}", flush=True)
+        finally:
+            with self._llm_lock:
+                kb.keyboard.block_input = False
+
     def step(self, display, result: FrameResult) -> list[str]:
         hud: list[str] = [
-            "Research demo — not medical or security-grade gaze tracking.",
+            "Research demo -- not medical or security-grade gaze tracking.",
         ]
         if self._gaze_file_label is not None:
             hud.append(f"Gaze file: {self._gaze_file_label}")
@@ -139,21 +185,38 @@ class LiveEyePipeline:
                 hud.append(f"Gaze xy: ({self._sm_gx:.0f}, {self._sm_gy:.0f})")
 
         if self._kbd is not None:
-            if self._sm_gx is not None and self._sm_gy is not None:
-                self._kbd.keyboard.update_gaze(self._sm_gx, self._sm_gy)
+            kb = self._kbd.keyboard
 
-            avg_ear = (m.left_ear + m.right_ear) / 2.0
-            if self._kbd.blink.feed(avg_ear):
-                letter = self._kbd.keyboard.select()
-                if letter is not None:
-                    hud.append(f"SELECTED: {letter}")
+            # Block all gaze + blink input while LLM is running
+            if not kb.block_input:
+                if self._sm_gx is not None and self._sm_gy is not None:
+                    kb.update_gaze(self._sm_gx, self._sm_gy)
+
+                avg_ear = (m.left_ear + m.right_ear) / 2.0
+                if self._kbd.blink.feed(avg_ear):
+                    letter = kb.select()
+                    if letter is not None:
+                        hud.append(f"SELECTED: {letter}")
+
+                # PREDICT must be consumed here; update_gaze must not clear last_action before this.
+                if self.llm_backend is not None and kb.last_action == "PREDICT":
+                    if kb.history:
+                        kb.last_action = None
+                        kb.block_overlay_text = "Expanding your message..."
+                        kb.block_input = True
+                        text = kb.history[-1]
+                        prior = list(kb.history[:-1])
+                        threading.Thread(
+                            target=self._fire_llm,
+                            args=(text, prior),
+                            daemon=True,
+                        ).start()
 
         return hud
 
     def draw_keyboard(self, kb_canvas: np.ndarray) -> None:
         if self._kbd is None:
             return
-        gaze_pt = (self._sm_gx, self._sm_gy) if self._sm_gx is not None else None
         self._kbd.keyboard.draw(
             kb_canvas,
             left_iris=self._sm_li,

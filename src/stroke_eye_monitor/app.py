@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from stroke_eye_monitor.audio_voice import SpokenContextBuffer
 
 import cv2
 import numpy as np
+
+from LLM.env import load_llm_env
+
+load_llm_env()
 
 from stroke_eye_monitor.cli_args import parse_args
 from stroke_eye_monitor.config import MonitorConfig
@@ -17,25 +27,16 @@ from stroke_eye_monitor.ui.drawing import draw_hud
 from stroke_eye_monitor.utils.frame import letterbox_to_width
 from stroke_eye_monitor.utils.fps import FpsMeter
 from stroke_eye_monitor.utils.threaded_capture import ThreadedVideoCapture
+from LLM.openai_backend import OpenAICompletion
 
 
-def _load_gaze_calibration(
-    args: argparse.Namespace,
-) -> tuple[GazeCalibration | None, int]:
-    """Load gaze JSON when ``--gaze``; return ``(calibration, exit_code)`` with ``exit_code`` 0 if ok."""
-    if not args.gaze:
-        return None, 0
-    gp = Path(args.gaze_file)
-    if not gp.is_file():
-        print(
-            f"Gaze file not found: {gp}  (run with --calibrate first)", file=sys.stderr
-        )
-        return None, 1
-    gaze_cal = GazeCalibration.load(gp)
+def _load_gaze_calibration_from_path(path: Path) -> tuple[GazeCalibration | None, int]:
+    """Load gaze JSON from ``path``. Return ``(calibration, exit_code)``; exit 1 on invalid file."""
+    gaze_cal = GazeCalibration.load(path)
     if gaze_cal.feature_dim != 8:
         print(
             "This gaze_calibration.json doesn't match the current gaze model. "
-            "Run --calibrate again to regenerate (expects 8 features: iris offsets, "
+            "Run calibration again to regenerate (expects 8 features: iris offsets, "
             "head rotation Rodrigues vector, bias).",
             file=sys.stderr,
         )
@@ -44,11 +45,22 @@ def _load_gaze_calibration(
 
 
 def _build_live_pipeline(
-    args: argparse.Namespace, gaze_cal: GazeCalibration | None
+    args: argparse.Namespace,
+    gaze_cal: GazeCalibration | None,
+    llm_backend=None,
+    *,
+    spoken_buffer: SpokenContextBuffer | None = None,
+    on_sentence_chosen: Callable[[str], None] | None = None,
 ) -> LiveEyePipeline:
     kbd: KeyboardSession | None = None
     if args.keyboard and gaze_cal is not None:
-        kbd = KeyboardSession.create_session(gaze_cal)
+        kbd = KeyboardSession.create_session(
+            gaze_cal,
+            on_sentence_chosen=on_sentence_chosen,
+            blink_close=args.blink_close,
+            blink_open=args.blink_open,
+            spoken_buffer=spoken_buffer,
+        )
 
     return LiveEyePipeline(
         gaze_file_label=args.gaze_file if args.gaze else None,
@@ -57,6 +69,8 @@ def _build_live_pipeline(
         gaze_ear_min=args.gaze_ear_min,
         full_mesh=args.full_mesh,
         keyboard=kbd,
+        llm_backend=llm_backend,
+        spoken_buffer=spoken_buffer,
     )
 
 
@@ -72,7 +86,7 @@ def run(argv: list[str] | None = None) -> int:
     target_width = screen_res[0] if screen_res else args.width
 
     cfg = MonitorConfig(
-        camera_index=1,
+        camera_index=args.camera,
         process_width=target_width,
         mirror_display=not args.no_mirror,
     )
@@ -101,7 +115,35 @@ def run(argv: list[str] | None = None) -> int:
 
         return collect_cli(args, proc_fn, cfg)
 
-    cap = cv2.VideoCapture(cfg.camera_index)
+    gaze_cal: GazeCalibration | None = None
+    if args.gaze:
+        gp = Path(args.gaze_file)
+        if gp.is_file():
+            gaze_cal, err = _load_gaze_calibration_from_path(gp)
+            if err != 0:
+                return err
+        elif args.no_auto_calibrate:
+            print(
+                f"Gaze calibration file not found: {gp.resolve()}. "
+                "Run without --no-auto-calibrate to calibrate once, or use --calibrate.",
+                file=sys.stderr,
+            )
+            return 1
+
+    if args.blink_open <= args.blink_close:
+        print(
+            f"Invalid blink thresholds: --blink-open ({args.blink_open}) must be greater than "
+            f"--blink-close ({args.blink_close}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Opening camera {cfg.camera_index}...", flush=True)
+
+    if os.name == "nt":
+        cap = cv2.VideoCapture(cfg.camera_index, cv2.CAP_DSHOW)
+    else:
+        cap = cv2.VideoCapture(cfg.camera_index)
     if not cap.isOpened():
         print(f"Cannot open camera index {cfg.camera_index}", file=sys.stderr)
         return 1
@@ -109,13 +151,117 @@ def run(argv: list[str] | None = None) -> int:
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     detector = FaceMeshEyeDetector(cfg, model_path=args.model)
-    gaze_cal, err = _load_gaze_calibration(args)
-    if err != 0:
-        detector.close()
-        cap.release()
-        return err
 
-    pipeline = _build_live_pipeline(args, gaze_cal)
+    if args.gaze and gaze_cal is None:
+        from stroke_eye_monitor.modes.gaze_calibration import run_calibration
+
+        gw, gh = (
+            (screen_res[0], screen_res[1])
+            if screen_res is not None
+            else (args.gaze_width, args.gaze_height)
+        )
+        print(
+            "No gaze calibration file found; starting interactive calibration (12 gaze points "
+            "+ blink timing), then continuing to the main view.",
+            flush=True,
+        )
+        cal = run_calibration(
+            cap=cap,
+            detector=detector,
+            proc_fn=proc_fn,
+            gaze_width=gw,
+            gaze_height=gh,
+            out_path=Path(args.gaze_file),
+            samples_per_point=args.gaze_samples,
+            ear_min=args.gaze_ear_min,
+            ridge_lambda=args.gaze_ridge,
+            blink_close=args.blink_close,
+            blink_open=args.blink_open,
+        )
+        if cal is None:
+            print("Calibration aborted.", file=sys.stderr)
+            detector.close()
+            cap.release()
+            return 1
+        gaze_cal = cal
+
+    llm = OpenAICompletion()
+    voice_listener = None
+    spoken_buffer = None
+    on_chosen: Callable[[str], None] | None = None
+    pipeline_ref: list[LiveEyePipeline | None] = [None]
+    voice_stt_wanted: list[bool] = [False]
+    if args.keyboard and not args.no_voice:
+        if args.voice_play_backend:
+            os.environ["NEUROVOX_AUDIO_PLAY_BACKEND"] = args.voice_play_backend
+        if args.voice_record_backend:
+            os.environ["NEUROVOX_AUDIO_RECORD_BACKEND"] = args.voice_record_backend
+        if getattr(args, "whisper_language", None):
+            os.environ["OPENAI_WHISPER_LANGUAGE"] = args.whisper_language
+        try:
+            from LLM.audio_platform import describe_audio_stack
+            from stroke_eye_monitor.audio_voice import SpokenContextBuffer, SttListener
+
+            spoken_buffer = SpokenContextBuffer()
+            voice_listener = SttListener(
+                llm,
+                spoken_buffer,
+                chunk_seconds=float(args.audio_chunk_seconds),
+                rms_threshold=args.stt_rms_threshold,
+                peak_threshold=args.stt_peak_threshold,
+            )
+            voice_listener.start()
+            print(
+                "Voice: mic -> Whisper (context) | chosen phrase -> OpenAI TTS",
+                flush=True,
+            )
+            print(describe_audio_stack(), flush=True)
+
+            def _speak_async(text: str) -> None:
+                """Block gaze + blink input and pause mic STT while TTS plays."""
+
+                def run() -> None:
+                    kbd = None
+                    pl = pipeline_ref[0]
+                    if pl is not None and pl.keyboard_session is not None:
+                        kbd = pl.keyboard_session.keyboard
+                    try:
+                        if voice_listener is not None:
+                            voice_listener.pause()
+                        llm.speak(text)
+                    finally:
+                        # STT on/off is driven by keyboard.input_enabled in the main loop
+                        # (idle = paused). Do not resume here or mic would run while idle.
+                        if kbd is not None:
+                            # Stay in typing mode after TTS so mic/STT can resume without
+                            # another triple-blink unlock (idle only applies at app start).
+                            kbd.block_input = False
+                            kbd.block_overlay_text = "Ready to type"
+                        if spoken_buffer is not None:
+                            spoken_buffer.clear()
+
+                pl = pipeline_ref[0]
+                if pl is not None and pl.keyboard_session is not None:
+                    kbd = pl.keyboard_session.keyboard
+                    kbd.block_overlay_text = "Speaking..."
+                    kbd.block_input = True
+                threading.Thread(target=run, daemon=True).start()
+
+            on_chosen = _speak_async
+        except (ImportError, RuntimeError, OSError) as exc:
+            print(f"Voice disabled: {exc}", flush=True)
+
+    pipeline = _build_live_pipeline(
+        args,
+        gaze_cal,
+        llm_backend=llm,
+        spoken_buffer=spoken_buffer,
+        on_sentence_chosen=on_chosen,
+    )
+    pipeline_ref[0] = pipeline
+    if voice_listener is not None and pipeline.keyboard_session is not None:
+        voice_listener.pause()
+
     fps_meter = FpsMeter()
     capture = ThreadedVideoCapture(cap)
 
@@ -130,6 +276,7 @@ def run(argv: list[str] | None = None) -> int:
         while True:
             ok, frame = capture.read(timeout=0.5)
             if not ok or frame is None:
+                print("Waiting for camera frame...", end="\r", flush=True)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):
                     break
@@ -143,6 +290,16 @@ def run(argv: list[str] | None = None) -> int:
 
             display = proc
             hud_lines = pipeline.step(display, result)
+
+            if voice_listener is not None and pipeline.keyboard_session is not None:
+                kb = pipeline.keyboard_session.keyboard
+                want_stt = kb.input_enabled and not kb.block_input
+                if voice_stt_wanted[0] != want_stt:
+                    voice_stt_wanted[0] = want_stt
+                    if want_stt:
+                        voice_listener.resume()
+                    else:
+                        voice_listener.pause()
 
             if cfg.mirror_display:
                 display = cv2.flip(display, 1)
@@ -166,6 +323,10 @@ def run(argv: list[str] | None = None) -> int:
 
                 display = canvas
 
+            if pipeline.keyboard_session is not None:
+                # Do not draw debug tracking values that overlap with the keyboard UI
+                hud_lines = []
+
             draw_hud(
                 display,
                 fps=fps,
@@ -185,6 +346,8 @@ def run(argv: list[str] | None = None) -> int:
             if key == ord("d"):
                 pipeline.backspace_typed()
     finally:
+        if voice_listener is not None:
+            voice_listener.stop()
         capture.stop()
         detector.close()
         cap.release()
