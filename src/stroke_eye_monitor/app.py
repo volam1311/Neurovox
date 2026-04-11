@@ -32,11 +32,11 @@ def _load_gaze_calibration(
         )
         return None, 1
     gaze_cal = GazeCalibration.load(gp)
-    if gaze_cal.feature_dim != 8:
+    if gaze_cal.feature_dim != 11:
         print(
             "This gaze_calibration.json doesn't match the current gaze model. "
-            "Run --calibrate again to regenerate (expects 8 features: iris offsets, "
-            "head rotation Rodrigues vector, bias).",
+            "Run --calibrate again to regenerate (expects 11 features: iris offsets, "
+            "head rotation vector, head translation vector, bias).",
             file=sys.stderr,
         )
         return None, 1
@@ -48,7 +48,11 @@ def _build_live_pipeline(
 ) -> LiveEyePipeline:
     kbd: KeyboardSession | None = None
     if args.keyboard and gaze_cal is not None:
-        kbd = KeyboardSession.create_session(gaze_cal)
+        kbd = KeyboardSession.create_session(
+            gaze_cal,
+            margin_top_frac=getattr(args, "kbd_top", None),
+            margin_bot_frac=getattr(args, "kbd_bottom", None),
+        )
 
     return LiveEyePipeline(
         gaze_file_label=args.gaze_file if args.gaze else None,
@@ -57,7 +61,8 @@ def _build_live_pipeline(
         gaze_ear_min=args.gaze_ear_min,
         full_mesh=args.full_mesh,
         keyboard=kbd,
-        keyboard_gaze_median_n=getattr(args, "gaze_keyboard_median", 3),
+        keyboard_gaze_median_n=getattr(args, "gaze_keyboard_median", 1),
+        keyboard_gaze_gain=getattr(args, "gaze_keyboard_gain", 1.0),
     )
 
 
@@ -184,6 +189,7 @@ def run(argv: list[str] | None = None) -> int:
             # Overlay keyboard directly onto the webcam feed (after mirror flip!)
             if pipeline.keyboard_session is not None:
                 pipeline.draw_keyboard(display)
+                pipeline.draw_gaze_pointer_on_keyboard(display)
 
             cv2.imshow(cfg.window_name, display)
             key = cv2.waitKey(1) & 0xFF

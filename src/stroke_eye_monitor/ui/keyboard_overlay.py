@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,6 +10,11 @@ import numpy as np
 
 # Expand each key's hit box (not the drawn box) so small gaze errors still land.
 _HIT_PAD_FRAC = 0.14
+
+# On wide screens, do not use full canvas width per key (that yields very long bars).
+# Cap key width relative to row height and center each row in the usable band.
+_KEY_MAX_WIDTH_OVER_HEIGHT = 1.12
+_KEY_GAP_FRAC = 0.06  # gap between keys as a fraction of key width (0 = touching)
 
 QWERTY_ROWS = [
     list("QWERTYUIOP"),
@@ -39,9 +45,9 @@ def keyboard_profile_for_gaze_model(model_type: str | None) -> KeyboardLayoutPro
     mt = (model_type or "").strip().lower()
     if mt in ("ridge", "poly"):
         return KeyboardLayoutProfile(
-            margin_x_frac=0.14,
-            margin_top_frac=0.22,
-            margin_bot_frac=0.15,
+            margin_x_frac=0.10,
+            margin_top_frac=0.06,
+            margin_bot_frac=0.20,
             dwell_seconds=0.62,
             overlay_key_alpha=0.62,
             active_outline_bgr=(0, 220, 255),
@@ -49,9 +55,9 @@ def keyboard_profile_for_gaze_model(model_type: str | None) -> KeyboardLayoutPro
         )
     if mt in ("rf", "xgboost", "gbr"):
         return KeyboardLayoutProfile(
-            margin_x_frac=0.07,
-            margin_top_frac=0.18,
-            margin_bot_frac=0.12,
+            margin_x_frac=0.06,
+            margin_top_frac=0.06,
+            margin_bot_frac=0.20,
             dwell_seconds=0.88,
             overlay_key_alpha=0.55,
             active_outline_bgr=(80, 160, 255),
@@ -59,9 +65,9 @@ def keyboard_profile_for_gaze_model(model_type: str | None) -> KeyboardLayoutPro
         )
     # svr, unknown, legacy
     return KeyboardLayoutProfile(
-        margin_x_frac=0.10,
-        margin_top_frac=0.20,
-        margin_bot_frac=0.15,
+        margin_x_frac=0.08,
+        margin_top_frac=0.06,
+        margin_bot_frac=0.20,
         dwell_seconds=0.75,
         overlay_key_alpha=0.58,
         active_outline_bgr=(50, 200, 255),
@@ -93,8 +99,6 @@ class GazeKeyboard:
     _canvas_h: int = 0
     _base_image: np.ndarray | None = field(default=None, repr=False, init=False)
 
-    _cell_enter_time: float = 0.0
-    _dwell_triggered: bool = False
     _blink_timestamps: list[float] = field(default_factory=list)
 
     _profile: KeyboardLayoutProfile = field(
@@ -116,6 +120,8 @@ class GazeKeyboard:
         canvas_h: int,
         *,
         gaze_model: str | None = None,
+        margin_top_frac: float | None = None,
+        margin_bot_frac: float | None = None,
     ) -> None:
         self._canvas_w = canvas_w
         self._canvas_h = canvas_h
@@ -125,26 +131,42 @@ class GazeKeyboard:
         self._gaze_model_label = raw.upper()[:14] if raw else "DEFAULT"
 
         p = self._profile
+        top_f = float(p.margin_top_frac if margin_top_frac is None else margin_top_frac)
+        bot_f = float(p.margin_bot_frac if margin_bot_frac is None else margin_bot_frac)
+        top_f = max(0.0, min(0.42, top_f))
+        bot_f = max(0.06, min(0.42, bot_f))
+        if top_f + bot_f >= 0.94:
+            bot_f = max(0.06, 0.94 - top_f - 0.01)
+
         margin_x = int(round(canvas_w * p.margin_x_frac))
-        top_y = int(round(canvas_h * p.margin_top_frac))
-        bot_y = int(round(canvas_h * (1.0 - p.margin_bot_frac)))
+        top_y = int(round(canvas_h * top_f))
+        bot_y = int(round(canvas_h * (1.0 - bot_f)))
 
         usable_w = canvas_w - 2 * margin_x
         usable_h = bot_y - top_y
         row_h = usable_h / ROWS
 
         max_keys = max(len(r) for r in QWERTY_ROWS)
-        key_w = usable_w / max_keys
+        # Row height drives a square-ish cell; never wider than this × height.
+        key_w_full = usable_w / float(max_keys)
+        key_w_cap = float(row_h) * _KEY_MAX_WIDTH_OVER_HEIGHT
+        key_w = min(key_w_full, key_w_cap)
+        gap = max(0.0, key_w * _KEY_GAP_FRAC)
 
         self.cells = []
         for r, row_keys in enumerate(QWERTY_ROWS):
             y0 = int(round(top_y + r * row_h))
             y1 = int(round(top_y + (r + 1) * row_h))
-            row_px_width = len(row_keys) * key_w
-            start_x = margin_x + (usable_w - row_px_width) / 2
+            n = len(row_keys)
+            row_inner_w = n * key_w + max(0, n - 1) * gap
+            start_x = margin_x + max(0.0, (usable_w - row_inner_w) * 0.5)
             for c, letter in enumerate(row_keys):
-                x0 = int(round(start_x + c * key_w))
-                x1 = int(round(start_x + (c + 1) * key_w))
+                x0f = start_x + c * (key_w + gap)
+                x1f = x0f + key_w
+                x0 = int(round(x0f))
+                x1 = int(round(x1f))
+                if x1 <= x0:
+                    x1 = x0 + 1
                 self.cells.append(KeyboardCell(
                     row=r, col=c, letter=letter,
                     x0=x0, y0=y0, x1=x1, y1=y1,
@@ -161,16 +183,52 @@ class GazeKeyboard:
         p = _HIT_PAD_FRAC * min(w, h)
         return (float(c.x0 - p), float(c.x1 + p), float(c.y0 - p), float(c.y1 + p))
 
-    def _nearest_center_index(self, gx: float, gy: float) -> int:
-        best_i = -1
-        min_d = float("inf")
+    def _nearest_key_row_first(self, gx: float, gy: float) -> int:
+        """Pick the closest QWERTY row by vertical distance, then closest key in that row by x.
+
+        The old global 2D nearest-center fallback pulled gaze toward the keyboard centroid
+        (roughly R–T–Y) whenever the point fell outside padded key rectangles.
+        """
+        if not self.cells:
+            return -1
+        by_row: dict[int, list[tuple[int, KeyboardCell]]] = defaultdict(list)
         for i, c in enumerate(self.cells):
-            cx, cy = self._cell_center(c)
-            d = (gx - cx) ** 2 + (gy - cy) ** 2
-            if d < min_d:
-                min_d = d
+            by_row[c.row].append((i, c))
+
+        row_metrics: list[tuple[float, float, int]] = []
+        for r, lst in by_row.items():
+            y0 = min(c.y0 for _, c in lst)
+            y1 = max(c.y1 for _, c in lst)
+            yc = 0.5 * (y0 + y1)
+            if y0 <= gy <= y1:
+                dy = 0.0
+            else:
+                dy = min(abs(gy - y0), abs(gy - y1))
+            row_metrics.append((dy, abs(gy - yc), r))
+        row_metrics.sort(key=lambda t: (t[0], t[1]))
+        best_row = row_metrics[0][2]
+
+        lst = by_row[best_row]
+        best_i = lst[0][0]
+        best_dx = float("inf")
+        for i, c in lst:
+            cx, _ = self._cell_center(c)
+            dx = abs(gx - cx)
+            if dx < best_dx:
+                best_dx = dx
                 best_i = i
         return best_i
+
+    def layout_bounds(self) -> tuple[int, int, int, int] | None:
+        """Axis-aligned bounds of all keys in layout pixels (same space as ``hit_test``)."""
+        if not self.cells:
+            return None
+        return (
+            min(c.x0 for c in self.cells),
+            max(c.x1 for c in self.cells),
+            min(c.y0 for c in self.cells),
+            max(c.y1 for c in self.cells),
+        )
 
     def hit_test(self, gx: float, gy: float) -> int:
         """Padded key rectangles first (easier to acquire), then strict, then nearest center."""
@@ -213,22 +271,10 @@ class GazeKeyboard:
                     best_i = j
             return best_i
 
-        return self._nearest_center_index(gx, gy)
+        return self._nearest_key_row_first(gx, gy)
 
     def update_gaze(self, gx: float, gy: float) -> None:
-        new_cell = self.hit_test(gx, gy)
-        if new_cell != self._active_cell:
-            self._active_cell = new_cell
-            self._cell_enter_time = time.time()
-            self._dwell_triggered = False
-        elif self._active_cell >= 0 and not self._dwell_triggered:
-            if time.time() - self._cell_enter_time >= self._profile.dwell_seconds:
-                self._dwell_triggered = True
-                letter = self.cells[self._active_cell].letter
-                if letter == " ":
-                    self.typed.append(" ")
-                else:
-                    self.typed.append(letter)
+        self._active_cell = self.hit_test(gx, gy)
 
     def select(self) -> str | None:
         """Called on blink. Triple-blink within 2.5s triggers PREDICT."""
@@ -247,6 +293,15 @@ class GazeKeyboard:
                     self.history.pop(0)
             self.typed.clear()
             return "PREDICT"
+        
+        # Single blink types the character
+        if self._active_cell >= 0:
+            letter = self.cells[self._active_cell].letter
+            if letter == " ":
+                self.typed.append(" ")
+            else:
+                self.typed.append(letter)
+            return letter
         return None
 
     @property
@@ -318,14 +373,8 @@ class GazeKeyboard:
                 font, scale, (0, 255, 255), thickness, cv2.LINE_AA,
             )
 
-            if not self._dwell_triggered:
-                elapsed = time.time() - self._cell_enter_time
-                dw = self._profile.dwell_seconds
-                progress = max(0.0, min(1.0, elapsed / dw))
-                if progress > 0:
-                    bar_h = int(round((dy1 - dy0) * progress))
-                    df_b, df_g, df_r = self._profile.dwell_fill_bgr
-                    cv2.rectangle(overlay, (dx0, dy1 - bar_h), (dx1, dy1), (df_b, df_g, df_r), -1)
+            df_b, df_g, df_r = self._profile.dwell_fill_bgr
+            cv2.rectangle(overlay, (dx0, dy1 - int((dy1 - dy0) * 0.1)), (dx1, dy1), (df_b, df_g, df_r), -1)
 
         ka = self._profile.overlay_key_alpha
         cv2.addWeighted(overlay, ka, frame, 1.0 - ka, 0, dst=frame)
@@ -357,9 +406,8 @@ class GazeKeyboard:
         bot_bar_h = 45
         cv2.rectangle(frame, (0, h - bot_bar_h), (w, h), (20, 20, 20), -1)
 
-        dwell_ms = int(round(self._profile.dwell_seconds * 1000))
         hint = (
-            f"Dwell {dwell_ms}ms = type  |  Blink 3x = PREDICT  |  D = backspace"
+            f"Blink = type  |  Blink 3x = PREDICT  |  D = backspace"
             f"  |  gaze: {self._gaze_model_label}"
         )
         cv2.putText(frame, hint, (15, h - 14), font, 0.55, (180, 180, 180), 2, cv2.LINE_AA)

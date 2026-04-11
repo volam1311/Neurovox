@@ -1,7 +1,7 @@
 """Raw iris-offset collection for analysis.
 
 This mode saves **iris offsets + screen dot** per point. It does **not** write the same
-8-D ``gaze_feature_vector`` as ``--calibrate`` (which adds head pose + bias). Do not
+11-D ``gaze_feature_vector`` as ``--calibrate`` (which adds head pose + bias). Do not
 expect to drop ``--collect`` CSV into the gaze mapper; use ``--calibrate`` for the app.
 """
 

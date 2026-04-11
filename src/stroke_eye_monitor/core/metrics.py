@@ -106,17 +106,19 @@ def gaze_feature_vector(
     m: EyeMetrics,
     face_matrix: np.ndarray | None,
 ) -> np.ndarray:
-    """8D vector: [l_iris_x, l_iris_y, r_iris_x, r_iris_y, head_rot_x, head_rot_y, head_rot_z, 1.0].
+    """11D vector: [l_iris_x, l_iris_y, r_iris_x, r_iris_y, head_rot_x, head_rot_y, head_rot_z, head_tx, head_ty, head_tz, 1.0].
 
-    If MediaPipe does not return a face transform matrix, head rotation is filled with
+    If MediaPipe does not return a face transform matrix, head transformation is filled with
     zeros so gaze regression still runs (quality is reduced until the matrix is back).
     """
     if face_matrix is None:
         rv = np.zeros(3, dtype=np.float64)
+        tv = np.zeros(3, dtype=np.float64)
     else:
         rmat = face_matrix[:3, :3]
         rvec, _ = cv2.Rodrigues(rmat)
         rv = rvec.reshape(3)
+        tv = face_matrix[:3, 3]
 
     return np.array(
         [
@@ -127,6 +129,9 @@ def gaze_feature_vector(
             float(rv[0]),
             float(rv[1]),
             float(rv[2]),
+            float(tv[0]),
+            float(tv[1]),
+            float(tv[2]),
             1.0,
         ],
         dtype=np.float64,

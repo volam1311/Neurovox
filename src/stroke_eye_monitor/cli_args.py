@@ -67,10 +67,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gaze-keyboard-median",
         type=int,
-        default=3,
+        default=1,
         help=(
-            "With --keyboard: median of the last N smoothed gaze points for key hit "
-            "(>=3 recommended; 0–2 disables extra median for snappier moves)"
+            "With --keyboard: median of the last N smoothed gaze samples for key hit "
+            "(1 = off; 3–5 smooths jitter but lags motion)"
+        ),
+    )
+    p.add_argument(
+        "--gaze-keyboard-gain",
+        type=float,
+        default=1.0,
+        help=(
+            "With --keyboard: scale gaze offset from keyboard center (>1 widens reach, "
+            "helps if the model only moves in a tight band; clamped to the canvas)"
         ),
     )
     p.add_argument(
@@ -117,6 +126,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--keyboard",
         action="store_true",
         help="Show gaze keyboard overlay (implies --gaze); blink to select letters",
+    )
+    p.add_argument(
+        "--kbd-top",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help=(
+            "Fraction of canvas height before first key row (0=top; default from layout). "
+            "Lower = keyboard higher, e.g. --kbd-top 0.02"
+        ),
+    )
+    p.add_argument(
+        "--kbd-bottom",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help="Fraction of canvas height reserved below last key row (default from layout)",
     )
     p.add_argument(
         "--collect",
