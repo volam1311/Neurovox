@@ -11,15 +11,19 @@ from .env import load_llm_env
 
 _DEFAULT_RANKED_SYSTEM = textwrap.dedent(
     """\
-    A chatbot asked someone a question. The person answered using a gaze or AAC keyboard:
-    very short replies, slang, internet acronyms (e.g. WDYM, IMFTK, FR, NVM), typos,
-    fragments, often ALL CAPS.
+    You always see **two** inputs together: (1) the **chatbot's question**, and (2) the
+    **person's short reply** from a gaze or AAC keyboard — acronyms (WDYM, IMFTK, …),
+    fragments, typos, often ALL CAPS.
 
-    Your job: propose the **top ranked interpretations** of what their reply **means**
-    **as an answer to the chatbot's question** — not random expansions of the acronym
-    in a vacuum. Rank 1 = most likely intent in context.
+    Use **both** the question and the short reply as one context window. Your job is to
+    list the **top ranked possible full replies from the person** — complete things they
+    might be trying to say **back to the chatbot** in that situation. Rank 1 = the reply
+    they most likely intended; ranks 2–5 are plausible alternatives.
 
-    Use plain, supportive language. Short phrases or one short sentence each.
+    Each suggestion should read as a **natural message from the person** (not a meta
+    explanation like "they mean X"). Plain, supportive tone. One short sentence or phrase
+    each unless a slightly longer answer is clearly right.
+
     Output only valid JSON per the schema in the first system block.
     """
 ).strip()
@@ -123,8 +127,8 @@ class OpenAICompletion:
 Schema:
 {{
   "suggestions": [
-    {{"rank": 1, "text": "most likely plain-English meaning of their reply in context"}},
-    {{"rank": 2, "text": "second most likely"}},
+    {{"rank": 1, "text": "most likely full reply the person could be sending to the chatbot"}},
+    {{"rank": 2, "text": "second most likely full reply from the person"}},
     ...
   ]
 }}
@@ -132,7 +136,7 @@ Schema:
 Rules:
 - Provide up to {k} objects in "suggestions" (ranks 1..{k}); prefer {k} unless input is empty or nonsensical.
 - "rank" must be integers 1..{k} with no duplicates.
-- "text" = a short interpretation of what they meant **as a response to the chatbot question** (not a dictionary definition only).
+- "text" = one **candidate reply from the person** (worded as they might say it), using **both** the given question and their short fragment together — not a dictionary gloss of the acronym alone.
 - No extra keys. No commentary outside the JSON."""
         system_parts = [json_rules]
         if context:
@@ -146,11 +150,12 @@ Rules:
             Chatbot question:
             \"\"\"{question.strip()}\"\"\"
 
-            Person's short reply (slang / acronym / fragment OK):
+            Person's short typed reply (same context — use both):
             \"\"\"{reply.strip()}\"\"\"
 
-            Return JSON with up to {k} ranked interpretations (1 = most likely). \
-            Each "text" should read like what they probably meant to say back to the chatbot.
+            Return JSON with up to {k} ranked **possible full replies from the person**
+            (rank 1 = most likely). Each "text" is one candidate message they might intend
+            to send, grounded in **both** the question and the fragment above.
             """
         ).strip()
 

@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class RankedSuggestion:
-    """One ranked interpretation of what the user's short reply likely means."""
+    """One ranked **candidate full reply** the person might intend (not a third-party gloss)."""
 
     rank: int
     text: str
@@ -14,7 +14,7 @@ class RankedSuggestion:
 
 @runtime_checkable
 class CompletionBackend(Protocol):
-    """Rank what a short AAC-style reply most likely means given a chatbot question."""
+    """Rank plausible **full replies from the person**, using chatbot question + short fragment."""
 
     def complete(
         self, *, question: str, reply: str, context: str | None = None
@@ -29,7 +29,7 @@ class CompletionBackend(Protocol):
         context: str | None = None,
         k: int = 5,
     ) -> list[RankedSuggestion]:
-        """Return up to ``k`` interpretations sorted by ``rank`` (1 = most likely)."""
+        """Return up to ``k`` candidate replies from the person (rank 1 = most likely)."""
 
 
 class EchoBackend:

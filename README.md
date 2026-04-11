@@ -2,7 +2,7 @@
 
 **Stroke-eye-monitor** is a webcam demo: **eye and iris** tracking with **MediaPipe**, optional **gaze calibration**, a **fullscreen gaze keyboard** (look + blink to type), and a **CSV collection** mode for later modelling.
 
-**LLM** (separate Python package under `src/LLM/`) ranks **what a short typed reply probably means** when a **chatbot asks a question** — useful for slang / acronyms (e.g. `WDYM`, `IMFTK`) after the person answers with a few letters.
+**LLM** (`src/LLM/`) takes **both** the **chatbot's question** and the person's **short typed reply** together, then ranks **five possible full replies from the person** (what they might really be trying to say back), e.g. after fragments like `WDYM` or `IMFTK`.
 
 > **Disclaimer:** Research / hackathon demo only — **not** a medical device, not clinical-grade or security-grade eye tracking, not a replacement for commercial eye trackers.
 
@@ -13,8 +13,8 @@
 | Topic | Details |
 |-------|---------|
 | **Problem space** | People with limited motor control may use **gaze + blink** to type; short replies are hard for a generic chatbot to interpret. |
-| **What runs today** | Live face mesh, optional **gaze on a calibrated canvas**, **26-key keyboard** with blink-to-select, **12-point calibration**, **random-dot data export**, **OpenAI-ranked interpretations** of chatbot Q + user reply (CLI / API, not yet inside the live keyboard window). |
-| **Demo idea** | (1) Run `--calibrate` once. (2) `--keyboard` to type a short answer. (3) Show `python -m LLM "<chatbot question>" "<typed reply>"` for top-5 ranked meanings. |
+| **What runs today** | Live face mesh, optional **gaze on a calibrated canvas**, **26-key keyboard** with blink-to-select, **12-point calibration**, **random-dot data export**, **OpenAI-ranked candidate replies** from the person (question + short fragment together; CLI / API, not yet inside the live keyboard window). |
+| **Demo idea** | (1) Run `--calibrate` once. (2) `--keyboard` to type a short answer. (3) Show `python -m LLM "<chatbot question>" "<typed reply>"` for top-5 ranked **full replies** they might intend. |
 | **Not in scope / stretch** | Medical claims, dwell-to-confirm strip, TTS, deep learned gaze (e.g. GazeCapture-style), wiring LLM output into the OpenCV keyboard UI. |
 
 ---
@@ -145,7 +145,7 @@ Rough map from “idea on a whiteboard” to this repo:
 
 - **MediaPipe Face Landmarker:** [Face Landmarker](https://developers.google.com/mediapipe/solutions/vision/face_landmarker) (tasks API used here).
 - **GazeCapture:** Large learned **appearance → gaze**; we use **geometry + quick personal calibration** instead.
-- **SpeakFaster / AAC:** Broader communication stack; we focus on **eyes + optional gaze + keyboard**, plus a small **LLM** helper for interpreting short replies ([SpeakFaster blog](https://research.google/blog/speakfaster-revolutionizing-communication-for-people-with-severe-motor-impairments/)).
+- **SpeakFaster / AAC:** Broader communication stack; we focus on **eyes + optional gaze + keyboard**, plus a small **LLM** helper that ranks **candidate full replies** from the user given chatbot question + short fragment ([SpeakFaster blog](https://research.google/blog/speakfaster-revolutionizing-communication-for-people-with-severe-motor-impairments/)).
 
 ---
 
@@ -161,7 +161,7 @@ Rough map from “idea on a whiteboard” to this repo:
 | `src/stroke_eye_monitor/pipeline/` | Live per-frame pipeline (metrics → gaze → keyboard hooks) |
 | `src/stroke_eye_monitor/modes/` | Calibration + CSV collection flows |
 | `src/stroke_eye_monitor/utils/` | Frame resize, OpenCV fullscreen sync, FPS, threaded capture |
-| `src/LLM/` | `OpenAICompletion`: chatbot **question** + user **short reply** → top-5 ranked plain-English meanings (`EchoBackend` for tests) |
+| `src/LLM/` | `OpenAICompletion`: **question + short reply** → top-5 ranked **candidate full replies from the person** (`EchoBackend` for tests) |
 | `models/` | `face_landmarker.task` (downloaded; not committed) |
 | `gaze_calibration.json` | Your calibration (gitignored) |
 | `gaze_data*.csv` | Collection output (gitignored) |
@@ -183,7 +183,7 @@ Rough map from “idea on a whiteboard” to this repo:
   PYTHONPATH=src python -m LLM "Chatbot question here" "SHORTREPLY"
   ```
 
-  Prints five ranked lines. Same behavior via `OpenAICompletion.complete_ranked(question=..., reply=..., k=5)` in code. Not yet hooked into the live keyboard window.
+  Prints five ranked **candidate replies from the person** (joint use of question + fragment). Same via `OpenAICompletion.complete_ranked(question=..., reply=..., k=5)`. Not yet hooked into the live keyboard window.
 
 ---
 
