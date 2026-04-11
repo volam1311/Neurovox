@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import List, Optional
 
 import cv2
+import mediapipe as mp
 import numpy as np
 from mediapipe.tasks.python.components.containers import landmark as landmark_lib
 from mediapipe.tasks.python.core import base_options as base_options_module
 from mediapipe.tasks.python.vision import face_landmarker as fl_module
-from mediapipe.tasks.python.vision.core import image as mp_image_module
 from mediapipe.tasks.python.vision.core import vision_task_running_mode as running_mode_module
 
 from stroke_eye_monitor.config import MonitorConfig
@@ -60,7 +60,7 @@ class FaceMeshEyeDetector:
         h, w = bgr.shape[:2]
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
-        mp_image = mp_image_module.Image(mp_image_module.ImageFormat.SRGB, rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
         ts = int((time.perf_counter() - self._t0) * 1000)
         if ts <= self._last_ts_ms:

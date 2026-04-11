@@ -31,8 +31,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--calibrate",
+        "--calibration",
         action="store_true",
-        help="Run gaze calibration (saves --gaze-file), then exit",
+        dest="calibrate",
+        help="Run gaze calibration (saves --gaze-file), then exit (--calibration is the same)",
     )
     p.add_argument(
         "--gaze",
@@ -50,14 +52,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gaze-samples",
         type=int,
-        default=45,
-        help="Frames averaged per calibration point after SPACE",
+        default=10,
+        help=(
+            "Valid gaze frames collected per dot after SPACE (default 10 ≈ one second "
+            "at ~10 usable frames/s); raise for less noise"
+        ),
     )
     p.add_argument(
         "--gaze-alpha",
         type=float,
         default=0.25,
         help="Exponential smoothing for gaze position (0..1, higher = snappier)",
+    )
+    p.add_argument(
+        "--gaze-keyboard-median",
+        type=int,
+        default=3,
+        help=(
+            "With --keyboard: median of the last N smoothed gaze points for key hit "
+            "(>=3 recommended; 0–2 disables extra median for snappier moves)"
+        ),
     )
     p.add_argument(
         "--gaze-ear-min",
@@ -70,6 +84,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1e-2,
         help="Ridge regularization used during calibration fit (only affects --calibrate)",
+    )
+    p.add_argument(
+        "--gaze-model",
+        type=str,
+        default="auto",
+        choices=("auto", "ridge", "poly", "svr", "gbr", "xgboost", "rf"),
+        help=(
+            "Regression model for --calibrate. 'auto' evaluates all candidates and "
+            "selects the best by LOO-CV without prompting. "
+            "Choices: ridge, poly, svr, gbr, xgboost, rf. Default: auto"
+        ),
+    )
+    p.add_argument(
+        "--gaze-cal-grid",
+        action="store_true",
+        help="Use fixed 4x3 calibration grid instead of random dot positions (--calibrate)",
+    )
+    p.add_argument(
+        "--gaze-cal-points",
+        type=int,
+        default=36,
+        help="Number of random calibration dots for --calibrate (default 36, min 3)",
+    )
+    p.add_argument(
+        "--gaze-cal-seed",
+        type=int,
+        default=None,
+        help="RNG seed for random calibration layout (default: different each run)",
     )
     p.add_argument(
         "--keyboard",
@@ -92,5 +134,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=36,
         help="Number of random points to collect (default: 36)",
+    )
+    p.add_argument(
+        "--collect-samples",
+        type=int,
+        default=45,
+        help="Valid frames per dot for --collect only (default 45; see --gaze-samples for --calibrate)",
     )
     return p.parse_args(argv)

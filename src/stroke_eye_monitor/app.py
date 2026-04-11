@@ -57,6 +57,7 @@ def _build_live_pipeline(
         gaze_ear_min=args.gaze_ear_min,
         full_mesh=args.full_mesh,
         keyboard=kbd,
+        keyboard_gaze_median_n=getattr(args, "gaze_keyboard_median", 3),
     )
 
 
@@ -72,7 +73,7 @@ def run(argv: list[str] | None = None) -> int:
     target_width = screen_res[0] if screen_res else args.width
 
     cfg = MonitorConfig(
-        camera_index=1,
+        camera_index=args.camera,
         process_width=target_width,
         mirror_display=not args.no_mirror,
     )
@@ -94,7 +95,12 @@ def run(argv: list[str] | None = None) -> int:
     if args.calibrate:
         from stroke_eye_monitor.modes.gaze_calibration import calibrate_cli
 
-        return calibrate_cli(args, proc_fn, cfg)
+        rc = calibrate_cli(args, proc_fn, cfg)
+        if rc != 0:
+            return rc
+        print("Calibration complete — launching keyboard …", flush=True)
+        args.gaze = True
+        args.keyboard = True
 
     if args.collect:
         from stroke_eye_monitor.modes.data_collection import collect_cli
@@ -134,7 +140,8 @@ def run(argv: list[str] | None = None) -> int:
                 if key in (27, ord("q")):
                     break
                 if key == ord("d"):
-                    pipeline.backspace_typed()
+                    if not pipeline.keyboard_go_back():
+                        pipeline.backspace_typed()
                 continue
 
             fps = fps_meter.tick()
@@ -183,7 +190,8 @@ def run(argv: list[str] | None = None) -> int:
             if key in (27, ord("q")):
                 break
             if key == ord("d"):
-                pipeline.backspace_typed()
+                if not pipeline.keyboard_go_back():
+                    pipeline.backspace_typed()
     finally:
         capture.stop()
         detector.close()
