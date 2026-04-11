@@ -21,12 +21,21 @@ from stroke_eye_monitor.core.gaze_mapping import (
 from stroke_eye_monitor.core.metrics import compute_eye_metrics, gaze_feature_vector
 from stroke_eye_monitor.utils.opencv_canvas import sync_opencv_window_canvas
 
-# 12-point grid: 4x3 (columns x rows), row-major.
-_COL_FRAC = (0.08, 0.36, 0.64, 0.92)
-_ROW_FRAC = (0.10, 0.50, 0.90)
-DEFAULT_TARGETS: list[tuple[float, float]] = [
-    (x, y) for y in _ROW_FRAC for x in _COL_FRAC
-]
+def _fixed_grid_norm_positions(
+    *,
+    n_per_side: int,
+    margin: float = 0.06,
+) -> list[tuple[float, float]]:
+    """Evenly spaced normalized (0..1) dots, row-major (top→bottom, left→right)."""
+    lo = float(margin)
+    hi = 1.0 - float(margin)
+    xs = np.linspace(lo, hi, int(n_per_side), dtype=np.float64)
+    ys = np.linspace(lo, hi, int(n_per_side), dtype=np.float64)
+    return [(float(x), float(y)) for y in ys for x in xs]
+
+
+# Fixed 6x6 = 36 targets, inset from edges (reproducible; good screen coverage).
+FIXED_GRID_36_TARGETS: list[tuple[float, float]] = _fixed_grid_norm_positions(n_per_side=6)
 
 
 def _random_norm_targets(
@@ -76,7 +85,7 @@ def run_calibration(
     calibration_seed: int | None = None,
 ) -> GazeCalibration | None:
     """
-    Show fixation dots on a gaze-sized canvas (random positions by default, or optional grid).
+    Show fixation dots on a gaze-sized canvas (fixed 6x6 grid by default, or random if disabled).
     User looks at each dot and presses SPACE. Iris features are regressed to dot positions.
     """
     if samples_per_point < 1:
@@ -85,7 +94,7 @@ def run_calibration(
     if targets is not None:
         t_list = targets
     elif use_fixed_grid:
-        t_list = list(DEFAULT_TARGETS)
+        t_list = list(FIXED_GRID_36_TARGETS)
     else:
         if n_calibration_points < 3:
             raise ValueError("Need at least 3 calibration points (set --gaze-cal-points >= 3).")
@@ -104,7 +113,11 @@ def run_calibration(
         f"Calibration canvas (OpenCV window): {gaze_width} x {gaze_height}",
         flush=True,
     )
-    layout = "custom list" if targets is not None else ("4x3 grid" if use_fixed_grid else "random")
+    layout = (
+        "custom list"
+        if targets is not None
+        else ("6x6 fixed grid" if use_fixed_grid else "random")
+    )
     print(f"Calibration layout: {layout} ({len(t_list)} points)", flush=True)
 
     feature_rows: list[np.ndarray] = []
@@ -372,7 +385,7 @@ def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
                 ear_min=args.gaze_ear_min,
                 ridge_lambda=args.gaze_ridge,
                 gaze_model=getattr(args, "gaze_model", "auto"),
-                use_fixed_grid=getattr(args, "gaze_cal_grid", False),
+                use_fixed_grid=not getattr(args, "gaze_cal_random", False),
                 n_calibration_points=max(3, int(getattr(args, "gaze_cal_points", 36))),
                 calibration_seed=getattr(args, "gaze_cal_seed", None),
             )

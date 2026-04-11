@@ -106,9 +106,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--gaze-cal-grid",
+        "--gaze-cal-random",
         action="store_true",
-        help="Use fixed 4x3 calibration grid instead of random dot positions (--calibrate)",
+        help=(
+            "With --calibrate: random dot layout (default is fixed 6x6 grid, 36 points, reproducible)"
+        ),
     )
     p.add_argument(
         "--gaze-cal-points",
