@@ -88,6 +88,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--no-gaze-keyboard-gravity",
+        action="store_true",
+        help=(
+            "With --keyboard: disable snapping the gaze dot to the center of the highlighted "
+            "key (default: gravity on — reduces visual jitter while keeping hit test on raw gaze)"
+        ),
+    )
+    p.add_argument(
         "--gaze-ear-min",
         type=float,
         default=0.17,
@@ -153,6 +161,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "After typing is unlocked: hold eyes closed (EAR below --blink-close) for this long "
             "to confirm and send the line to inference (default: 3). No gaze position required."
+        ),
+    )
+    p.add_argument(
+        "--wink-mic-hold-seconds",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help=(
+            "Hold a right-eye wink (right closed, left open) this long to arm mic capture; "
+            "left-eye wink this long to disarm. No audio is recorded when disarmed (default: 1)."
         ),
     )
     p.add_argument(
