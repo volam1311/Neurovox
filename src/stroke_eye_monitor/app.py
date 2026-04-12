@@ -293,7 +293,12 @@ def run(argv: list[str] | None = None) -> int:
 
             if voice_listener is not None and pipeline.keyboard_session is not None:
                 kb = pipeline.keyboard_session.keyboard
-                want_stt = kb.input_enabled and not kb.block_input
+                # Listen whenever we are not in LLM/TTS (block_input) or picking a suggestion,
+                # including while idle — so speech context is captured before triple-blink unlock.
+                want_stt = (
+                    not kb.block_input
+                    and not kb.suggestions
+                )
                 if voice_stt_wanted[0] != want_stt:
                     voice_stt_wanted[0] = want_stt
                     if want_stt:

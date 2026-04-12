@@ -26,7 +26,7 @@ class SpokenContextBuffer:
     """Thread-safe rolling buffer of Whisper transcripts.
 
     Shown in the UI while STT is active (typing mode). ``get_for_llm`` consumes
-    the buffer for the next expansion; ``clear`` drops it when returning to idle.
+    the buffer for the next inference; ``clear`` drops it when returning to idle.
     """
 
     def __init__(self, *, max_snippets: int = 12, max_chars: int = 6000) -> None:
