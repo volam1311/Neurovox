@@ -23,6 +23,7 @@ from stroke_eye_monitor.config import MonitorConfig
 from stroke_eye_monitor.core.detector import FaceMeshEyeDetector
 from stroke_eye_monitor.core.gaze_mapping import GazeCalibration
 from stroke_eye_monitor.pipeline.live import KeyboardSession, LiveEyePipeline
+from stroke_eye_monitor.ui.brand_theme import BRAND_OFF_WHITE
 from stroke_eye_monitor.ui.drawing import draw_hud
 from stroke_eye_monitor.utils.frame import letterbox_to_width
 from stroke_eye_monitor.utils.fps import FpsMeter
@@ -63,6 +64,8 @@ def _build_live_pipeline(
             margin_top_frac=getattr(args, "kbd_top", None),
             margin_bot_frac=getattr(args, "kbd_bottom", None),
             infer_confirm_hold_s=float(getattr(args, "infer_confirm_seconds", 3.0)),
+            wink_mic_hold_s=float(getattr(args, "wink_mic_hold_seconds", 1.0)),
+            gravity_snap=not getattr(args, "no_gaze_keyboard_gravity", False),
         )
 
     return LiveEyePipeline(
@@ -77,6 +80,7 @@ def _build_live_pipeline(
         keyboard_gaze_median_n=getattr(args, "gaze_keyboard_median", 1),
         keyboard_gaze_gain=getattr(args, "gaze_keyboard_gain", 1.0),
         blink_close_threshold=args.blink_close,
+        blink_open_threshold=args.blink_open,
     )
 
 
@@ -313,10 +317,11 @@ def run(argv: list[str] | None = None) -> int:
 
             if voice_listener is not None and pipeline.keyboard_session is not None:
                 kb = pipeline.keyboard_session.keyboard
-                # Listen whenever we are not in LLM/TTS (block_input) or picking a suggestion,
-                # including while idle — so speech context is captured before eye-close unlock.
+                voice_listener.set_mic_armed(kb.mic_capture_enabled)
+                # Whisper only while mic is armed (right-eye wink) and not in TTS/suggestions.
                 want_stt = (
-                    not kb.block_input
+                    kb.mic_capture_enabled
+                    and not kb.block_input
                     and not kb.suggestions
                 )
                 if voice_stt_wanted[0] != want_stt:
@@ -334,8 +339,7 @@ def run(argv: list[str] | None = None) -> int:
                 sw, sh = screen_res
                 fh, fw = display.shape[:2]
 
-                # Create a black background to match the OS resolution exactly
-                canvas = np.zeros((sh, sw, 3), dtype=np.uint8)
+                canvas = np.full((sh, sw, 3), BRAND_OFF_WHITE, dtype=np.uint8)
 
                 # Center the camera image inside the canvas
                 dx = (sw - fw) // 2
