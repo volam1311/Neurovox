@@ -1,5 +1,5 @@
 """
-Console entry for PyInstaller Windows builds.
+Console entry for PyInstaller one-file bundles (Windows, macOS, Linux).
 
 Install the project first (``pip install -e .``), then point PyInstaller at this file.
 """

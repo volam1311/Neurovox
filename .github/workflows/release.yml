@@ -1,11 +1,12 @@
-# Build a Windows .exe and attach it to a GitHub Release when you push a version tag (e.g. v0.1.1).
+# Build PyInstaller one-file bundles for Windows, macOS, and Linux; attach them to a
+# GitHub Release when you push a version tag (e.g. v0.1.1).
 #
 #   git tag v0.1.1
 #   git push origin v0.1.1
 #
 # Requires: repo Settings → Actions → General → Workflow permissions → Read and write.
 
-name: Release (Windows exe)
+name: Release (multi-platform)
 
 on:
   push:
@@ -21,11 +22,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-exe:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            slug: windows
+          - os: macos-latest
+            slug: macos
+          - os: ubuntu-latest
+            slug: linux
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Linux system libraries (OpenCV)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,41 +60,54 @@ jobs:
           pip install "pyinstaller>=6.0"
 
       - name: Build one-file executable
-        shell: pwsh
+        shell: bash
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ($tag -eq "") { $tag = "dev" }
-          pyinstaller --noconfirm --clean `
-            --onefile `
-            --name "NeurovoxStrokeEyeMonitor-${tag}" `
-            --collect-all mediapipe `
-            --collect-all cv2 `
-            --collect-all sklearn `
-            --collect-all xgboost `
-            --hidden-import=certifi `
-            --hidden-import=dotenv `
-            --hidden-import=sounddevice `
-            --hidden-import=openai `
-            --hidden-import=pandas `
-            --hidden-import=LLM `
-            --hidden-import=LLM.openai_backend `
-            --hidden-import=LLM.completion `
-            --hidden-import=LLM.env `
-            --hidden-import=LLM.audio_platform `
-            --hidden-import=LLM.stt_whisper `
-            scripts/windows_entry.py
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME:-dev}"
+          NAME="NeurovoxStrokeEyeMonitor-${TAG}-${{ matrix.slug }}"
+          pyinstaller --noconfirm --clean \
+            --onefile \
+            --name "${NAME}" \
+            --collect-all mediapipe \
+            --collect-all cv2 \
+            --collect-all sklearn \
+            --collect-all xgboost \
+            --hidden-import=certifi \
+            --hidden-import=dotenv \
+            --hidden-import=sounddevice \
+            --hidden-import=openai \
+            --hidden-import=pandas \
+            --hidden-import=LLM \
+            --hidden-import=LLM.openai_backend \
+            --hidden-import=LLM.completion \
+            --hidden-import=LLM.env \
+            --hidden-import=LLM.audio_platform \
+            --hidden-import=LLM.stt_whisper \
+            scripts/pyinstaller_entry.py
 
-      - name: Upload artifact (workflow run)
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NeurovoxStrokeEyeMonitor-windows
-          path: dist/*.exe
+          name: bundle-${{ matrix.slug }}
+          path: dist/*
+          if-no-files-found: error
 
-      - name: Create GitHub Release (tag pushes only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all platform bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.exe
+          files: release-assets/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
