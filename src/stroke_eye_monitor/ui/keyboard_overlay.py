@@ -9,6 +9,32 @@ from typing import Any
 import cv2
 import numpy as np
 
+from LLM.audio_platform import play_infer_confirm_chime_async
+
+from stroke_eye_monitor.ui.brand_theme import (
+    BRAND_ACCENT_SOFT,
+    BRAND_TEAL,
+    CHAT_CARD_BORDER,
+    CHAT_CARD_HI,
+    CHAT_DIVIDER,
+    CHAT_HEADER,
+    CHAT_KEY_BG,
+    CHAT_KEY_EDGE,
+    CHAT_KEY_INNER,
+    CHAT_MUTED,
+    CHAT_PANEL,
+    CHAT_SUCCESS,
+    CHAT_SURFACE,
+    CHAT_TEXT,
+    CHAT_ACCENT,
+    CHAT_ACCENT_SOFT,
+    CHAT_ON_ACCENT,
+    RESET_BTN_BORDER,
+    RESET_BTN_FILL,
+    RESET_BTN_HI,
+    RESET_BTN_TEXT,
+)
+
 # From origin/main: gaze-model-aware geometry + robust hit testing (eye_dimension stack).
 _HIT_PAD_FRAC = 0.14
 _KEY_MAX_WIDTH_OVER_HEIGHT = 1.32
@@ -18,7 +44,7 @@ _KEY_GAP_FRAC = 0.06
 QWERTY_ROWS = [
     list("QWERTYUIOP"),
     list("ASDFGHJKL"),
-    list("ZXCVBNM") + ["BKSP"],
+    list("ZXCVBNM") + [",", ".", "BKSP"],
 ]
 ROWS = len(QWERTY_ROWS)
 
@@ -46,8 +72,8 @@ def keyboard_profile_for_gaze_model(model_type: str | None) -> KeyboardLayoutPro
             margin_bot_frac=0.20,
             dwell_seconds=0.62,
             overlay_key_alpha=0.62,
-            active_outline_bgr=(0, 220, 255),
-            dwell_fill_bgr=(76, 175, 80),
+            active_outline_bgr=BRAND_TEAL,
+            dwell_fill_bgr=BRAND_ACCENT_SOFT,
         )
     if mt in ("rf", "xgboost", "gbr"):
         return KeyboardLayoutProfile(
@@ -56,8 +82,8 @@ def keyboard_profile_for_gaze_model(model_type: str | None) -> KeyboardLayoutPro
             margin_bot_frac=0.20,
             dwell_seconds=0.88,
             overlay_key_alpha=0.55,
-            active_outline_bgr=(80, 160, 255),
-            dwell_fill_bgr=(70, 170, 100),
+            active_outline_bgr=BRAND_TEAL,
+            dwell_fill_bgr=BRAND_ACCENT_SOFT,
         )
     return KeyboardLayoutProfile(
         margin_x_frac=0.08,
@@ -65,34 +91,40 @@ def keyboard_profile_for_gaze_model(model_type: str | None) -> KeyboardLayoutPro
         margin_bot_frac=0.20,
         dwell_seconds=0.75,
         overlay_key_alpha=0.58,
-        active_outline_bgr=(50, 200, 255),
-        dwell_fill_bgr=(76, 175, 80),
+        active_outline_bgr=BRAND_TEAL,
+        dwell_fill_bgr=BRAND_ACCENT_SOFT,
     )
 
 # Session transcript for LLM context (sliding window is applied server-side)
 _MAX_HISTORY_TURNS = 32
 
-# BGR — modern slate + cyan accent (readable on camera)
-_C_BAR = (42, 48, 58)
-_C_KEY_BG = (38, 44, 54)
-_C_KEY_EDGE = (85, 95, 110)
-_C_PANEL = (34, 40, 50)
-_C_CARD = (48, 56, 68)
-_C_BORDER = (75, 95, 110)
-_C_CARD_HI = (58, 68, 88)
-_C_ACCENT = (255, 190, 80)
-_C_ACCENT2 = (255, 220, 120)
-_C_TEXT = (245, 245, 250)
-_C_MUTED = (155, 165, 180)
-_C_TYPED = (220, 230, 255)
-_C_GREEN = (80, 175, 76)
+# BGR — chat-style neutrals (see brand_theme.py)
+_C_BAR = CHAT_DIVIDER
+_C_HEADER = CHAT_HEADER
+_C_KEY_BG = CHAT_KEY_BG
+_C_KEY_EDGE = CHAT_KEY_EDGE
+_C_KEY_INNER = CHAT_KEY_INNER
+_C_PANEL = CHAT_PANEL
+_C_CARD = CHAT_SURFACE
+_C_BORDER = CHAT_CARD_BORDER
+_C_CARD_HI = CHAT_CARD_HI
+_C_ACCENT = CHAT_ACCENT
+_C_ACCENT2 = CHAT_ACCENT_SOFT
+_C_TEXT = CHAT_TEXT
+_C_MUTED = CHAT_MUTED
+_C_TYPED = CHAT_TEXT
+_C_GREEN = CHAT_SUCCESS
+# Inner padding for key face (fraction of min key side)
+_KEY_FACE_PAD_FRAC = 0.10
 
 # Original blink UX: count blinks in a short window; confirm as soon as 3 are seen (no extra pause).
 _BLINK_WINDOW_S = 2.5
 # After last blink, quiet time before committing a phrase pick (suggestions only).
 _SUGGEST_COMMIT_PAUSE_S = 0.55
-# If only 1 blink so far, wait longer before choosing option 1 so 2nd/3rd blink can land in time.
-_SUGGEST_SINGLE_BLINK_CONFIRM_S = 1.35
+# If only 1 blink so far, wait this long after the blink before locking option 1 (time for 2nd/3rd).
+_SUGGEST_SINGLE_BLINK_CONFIRM_S = 2.0
+# Ignore blink edges for this long after suggestions appear (avoids spurious pick from UI transition).
+_SUGGEST_BLINK_ARM_DELAY_S = 1.6
 
 
 def _key_face_label(letter: str) -> str:
@@ -107,6 +139,11 @@ def _truncate(s: str, max_chars: int) -> str:
     if len(s) <= max_chars:
         return s
     return s[: max(0, max_chars - 1)] + "..."
+
+
+def _point_in_rect(gx: float, gy: float, rect: tuple[int, int, int, int]) -> bool:
+    x0, y0, x1, y1 = rect
+    return x0 <= gx <= x1 and y0 <= gy <= y1
 
 
 @dataclass
@@ -144,14 +181,23 @@ class GazeKeyboard:
     last_action: str | None = None
 
     dwell_seconds: float = 0.8
+    # When True, gaze dot is drawn at the key center (hit test still uses raw gaze).
+    gravity_snap: bool = True
     # After unlock: cumulative seconds eyes closed to confirm line -> inference (no gaze rule).
     infer_confirm_hold_s: float = 3.0
     _infer_confirm_accum_s: float = field(default=0.0, repr=False)
     # Shown while TTS reads a chosen phrase (main thread draws; worker sets text).
     tts_spoken_text: str | None = None
 
+    # Voice STT: right-eye wink ~hold_s arms mic; left-eye wink disarms (no capture otherwise).
+    mic_capture_enabled: bool = False
+    wink_mic_hold_s: float = 1.0
+    _wink_r_hold_s: float = field(default=0.0, repr=False)
+    _wink_l_hold_s: float = field(default=0.0, repr=False)
+
     # After LLM: blink 1x / 2x / 3x to pick option; 4x = dismiss
     _suggest_blink_ts: list[float] = field(default_factory=list)
+    _suggest_armed_at: float = field(default=0.0, repr=False)
 
     on_sentence_chosen: Callable[[str], None] | None = None
     spoken_buffer: Any = None
@@ -161,9 +207,69 @@ class GazeKeyboard:
         repr=False,
     )
     _gaze_model_label: str = field(default="", repr=False)
+    # Header "RESET" hit box (layout px); gaze + blink returns to typing.
+    _reset_rect: tuple[int, int, int, int] | None = field(default=None, repr=False)
+    _reset_hover: bool = field(default=False, repr=False)
+    _blink: Any = field(default=None, repr=False, init=False)
+
+    def attach_blink(self, blink: Any) -> None:
+        """Optional blink detector ref so Reset can clear edge state without importing here."""
+        self._blink = blink
+
+    @property
+    def reset_hover(self) -> bool:
+        return bool(self._reset_hover)
 
     def reset_infer_confirm_accum(self) -> None:
         self._infer_confirm_accum_s = 0.0
+
+    def reset_mic_wink_accums(self) -> None:
+        self._wink_r_hold_s = 0.0
+        self._wink_l_hold_s = 0.0
+
+    def feed_mic_wink_gate(
+        self,
+        dt: float,
+        l_ear: float,
+        r_ear: float,
+        close_t: float,
+        open_t: float,
+        hold_s: float,
+    ) -> None:
+        """Arm/disarm mic capture: right-eye wink (R closed, L open) vs left-eye wink to stop."""
+        hold = max(0.25, float(hold_s))
+        if l_ear <= close_t and r_ear <= close_t:
+            self._wink_r_hold_s = 0.0
+            self._wink_l_hold_s = 0.0
+            return
+        if not self.mic_capture_enabled:
+            if r_ear <= close_t and l_ear >= open_t:
+                self._wink_r_hold_s += float(dt)
+                self._wink_l_hold_s = 0.0
+                if self._wink_r_hold_s >= hold:
+                    self.mic_capture_enabled = True
+                    self._wink_r_hold_s = 0.0
+                    print(">>> Mic capture ON (right-eye wink) <<<", flush=True)
+            else:
+                self._wink_r_hold_s = 0.0
+        else:
+            if l_ear <= close_t and r_ear >= open_t:
+                self._wink_l_hold_s += float(dt)
+                self._wink_r_hold_s = 0.0
+                if self._wink_l_hold_s >= hold:
+                    self.mic_capture_enabled = False
+                    self._wink_l_hold_s = 0.0
+                    print(">>> Mic capture OFF (left-eye wink) <<<", flush=True)
+            else:
+                self._wink_l_hold_s = 0.0
+
+    @property
+    def mic_wink_r_progress_s(self) -> float:
+        return float(self._wink_r_hold_s)
+
+    @property
+    def mic_wink_l_progress_s(self) -> float:
+        return float(self._wink_l_hold_s)
 
     def feed_infer_confirm_closure(
         self,
@@ -181,6 +287,7 @@ class GazeKeyboard:
             self._infer_confirm_accum_s += float(dt)
             if self._infer_confirm_accum_s >= hold:
                 self._infer_confirm_accum_s = 0.0
+                play_infer_confirm_chime_async()
                 self._trigger_predict()
         else:
             self._infer_confirm_accum_s = 0.0
@@ -194,6 +301,7 @@ class GazeKeyboard:
         self._suggest_blink_ts.clear()
         self._blink_timestamps.clear()
         self._infer_confirm_accum_s = 0.0
+        self._suggest_armed_at = time.time()
 
     def _dismiss_suggestions(self) -> None:
         self.suggestions = []
@@ -226,6 +334,8 @@ class GazeKeyboard:
         if not self.suggestions or self.block_input:
             return
         now = time.time()
+        if now < self._suggest_armed_at + _SUGGEST_BLINK_ARM_DELAY_S:
+            return
         self._suggest_blink_ts = [t for t in self._suggest_blink_ts if now - t <= 2.5]
         if not self._suggest_blink_ts:
             return
@@ -324,6 +434,14 @@ class GazeKeyboard:
                     )
                 )
 
+        reset_w = max(140, int(cw * 0.19))
+        reset_h = max(32, int(self._chat_title_h * 0.72))
+        reset_x1 = cw - margin_x
+        reset_x0 = reset_x1 - reset_w
+        reset_y0 = int(self._chat_title_h * 0.14)
+        reset_y1 = reset_y0 + reset_h
+        self._reset_rect = (reset_x0, reset_y0, reset_x1, reset_y1)
+
     @staticmethod
     def _cell_center(c: KeyboardCell) -> tuple[float, float]:
         return ((c.x0 + c.x1) * 0.5, (c.y0 + c.y1) * 0.5)
@@ -411,6 +529,8 @@ class GazeKeyboard:
     def update_gaze(self, gx: float, gy: float) -> None:
         self._last_gx = float(gx)
         self._last_gy = float(gy)
+        rr = self._reset_rect
+        self._reset_hover = rr is not None and _point_in_rect(float(gx), float(gy), rr)
         if self.suggestions and not self.block_input:
             self._tick_suggestion_blink_resolve()
             self._active_cell = -1
@@ -422,10 +542,52 @@ class GazeKeyboard:
 
         self._active_cell = self.hit_test(gx, gy)
 
+    def pointer_gaze_for_display(self) -> tuple[float, float]:
+        """Point for gaze overlay: snapped to the active key center when gravity is on."""
+        gx = float(self._last_gx if self._last_gx is not None else 0.0)
+        gy = float(self._last_gy if self._last_gy is not None else 0.0)
+        if self._reset_hover and self._reset_rect is not None:
+            x0, y0, x1, y1 = self._reset_rect
+            return ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+        if not self.gravity_snap:
+            return gx, gy
+        if self.suggestions:
+            return gx, gy
+        if not self.input_enabled:
+            return gx, gy
+        if 0 <= self._active_cell < len(self.cells):
+            return self._cell_center(self.cells[self._active_cell])
+        return gx, gy
+
+    def user_reset_interface(self) -> None:
+        """Leave suggestion / wait states and return to typing (large target + blink)."""
+        self.suggestions = []
+        self._suggest_blink_ts.clear()
+        self._suggest_armed_at = 0.0
+        self._active_cell = -1
+        self.block_input = False
+        self.block_overlay_text = "Ready to type"
+        self.last_action = None
+        self.tts_spoken_text = None
+        self._infer_confirm_accum_s = 0.0
+        self.typed.clear()
+        if self._blink is not None:
+            try:
+                self._blink.reset()
+            except Exception:
+                pass
+
     def select(self) -> str | None:
         """Suggestions: blink count. Else: 3 blinks unlock; blink on key types; infer uses eye closure."""
+        if self._reset_hover:
+            self.user_reset_interface()
+            print(">>> UI reset (Ready to type) <<<", flush=True)
+            return None
+
         if self.suggestions and not self.block_input:
             now = time.time()
+            if now < self._suggest_armed_at + _SUGGEST_BLINK_ARM_DELAY_S:
+                return None
             self._suggest_blink_ts.append(now)
             self._suggest_blink_ts = [t for t in self._suggest_blink_ts if now - t <= 2.5]
             return None
@@ -511,16 +673,26 @@ class GazeKeyboard:
             for cell in self.cells:
                 dx0, dy0 = int(round(cell.x0 * sx)), int(round(cell.y0 * sy))
                 dx1, dy1 = int(round(cell.x1 * sx)), int(round(cell.y1 * sy))
+                cw = max(1, dx1 - dx0)
+                ch = max(1, dy1 - dy0)
+                pad = max(2, int(min(cw, ch) * _KEY_FACE_PAD_FRAC))
+                ix0, iy0 = dx0 + pad, dy0 + pad
+                ix1, iy1 = dx1 - pad, dy1 - pad
+                if ix1 <= ix0:
+                    ix1 = ix0 + 1
+                if iy1 <= iy0:
+                    iy1 = iy0 + 1
                 cv2.rectangle(self._base_image, (dx0, dy0), (dx1, dy1), _C_KEY_BG, -1)
-                cv2.rectangle(self._base_image, (dx0, dy0), (dx1, dy1), _C_KEY_EDGE, 1)
+                cv2.rectangle(self._base_image, (dx0, dy0), (dx1, dy1), _C_KEY_EDGE, 2)
+                cv2.rectangle(self._base_image, (ix0, iy0), (ix1, iy1), _C_KEY_INNER, -1)
                 font = cv2.FONT_HERSHEY_DUPLEX
-                cell_px_w = dx1 - dx0
+                cell_px_w = ix1 - ix0
                 scale = max(1.0, min(3.0, cell_px_w / 40.0))
                 thick = max(2, min(7, int(round(cell_px_w / 22.0))))
                 cap_label = _key_face_label(cell.letter)
                 (tw, th_t), _ = cv2.getTextSize(cap_label, font, scale, thick)
-                tx = (dx0 + dx1) // 2 - tw // 2
-                ty = (dy0 + dy1) // 2 + th_t // 2
+                tx = (ix0 + ix1) // 2 - tw // 2
+                ty = (iy0 + iy1) // 2 + th_t // 2
                 cv2.putText(
                     self._base_image,
                     cap_label,
@@ -542,23 +714,33 @@ class GazeKeyboard:
             cell = self.cells[self._active_cell]
             dx0, dy0 = int(round(cell.x0 * sx)), int(round(cell.y0 * sy))
             dx1, dy1 = int(round(cell.x1 * sx)), int(round(cell.y1 * sy))
+            cw = max(1, dx1 - dx0)
+            ch = max(1, dy1 - dy0)
+            pad = max(2, int(min(cw, ch) * _KEY_FACE_PAD_FRAC))
+            ix0, iy0 = dx0 + pad, dy0 + pad
+            ix1, iy1 = dx1 - pad, dy1 - pad
+            if ix1 <= ix0:
+                ix1 = ix0 + 1
+            if iy1 <= iy0:
+                iy1 = iy0 + 1
             ol_b, ol_g, ol_r = self._profile.active_outline_bgr
             cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), _C_CARD_HI, -1)
             cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), (ol_b, ol_g, ol_r), 2)
+            cv2.rectangle(overlay, (ix0, iy0), (ix1, iy1), _C_KEY_INNER, -1)
             font = cv2.FONT_HERSHEY_DUPLEX
-            cell_px_w = dx1 - dx0
+            cell_px_w = ix1 - ix0
             scale = max(1.0, min(3.0, cell_px_w / 40.0))
             thick = min(max(3, min(8, int(round(cell_px_w / 20.0)))) + 1, 9)
             cap_label = _key_face_label(cell.letter)
             (tw, th_t), _ = cv2.getTextSize(cap_label, font, scale, thick)
-            tx = (dx0 + dx1) // 2 - tw // 2
-            ty = (dy0 + dy1) // 2 + th_t // 2
+            tx = (ix0 + ix1) // 2 - tw // 2
+            ty = (iy0 + iy1) // 2 + th_t // 2
             cv2.putText(overlay, cap_label, (tx, ty), font, scale, _C_ACCENT2, thick, cv2.LINE_AA)
             type_lbl = "type"
             cv2.putText(
                 overlay,
                 type_lbl,
-                (dx0 + 4, dy1 - 6),
+                (ix0 + 4, iy1 - 6),
                 font,
                 0.38 * scale,
                 _C_MUTED,
@@ -581,7 +763,8 @@ class GazeKeyboard:
         # Single chat-style panel: mic + history + your typing (+ suggestions inside same box).
         cv2.rectangle(frame, (0, 0), (w, kbd_top_px), _C_PANEL, -1)
         cv2.line(frame, (0, kbd_top_px - 1), (w, kbd_top_px - 1), _C_KEY_EDGE, 1)
-        cv2.rectangle(frame, (0, 0), (w, title_h_px), _C_BAR, -1)
+        cv2.rectangle(frame, (0, 0), (w, title_h_px), _C_HEADER, -1)
+        cv2.line(frame, (0, title_h_px - 1), (w, title_h_px - 1), _C_BAR, 1)
         cv2.putText(
             frame,
             "Conversation",
@@ -592,15 +775,39 @@ class GazeKeyboard:
             max(1, int(2 * sf)),
             cv2.LINE_AA,
         )
+        if self._reset_rect is not None:
+            x0, y0, x1, y1 = self._reset_rect
+            rx0 = int(round(x0 * sx))
+            ry0 = int(round(y0 * sy))
+            rx1 = int(round(x1 * sx))
+            ry1 = int(round(y1 * sy))
+            fill = RESET_BTN_HI if self._reset_hover else RESET_BTN_FILL
+            cv2.rectangle(frame, (rx0, ry0), (rx1, ry1), fill, -1)
+            cv2.rectangle(
+                frame,
+                (rx0, ry0),
+                (rx1, ry1),
+                RESET_BTN_BORDER,
+                max(2, int(2 * sf)),
+                cv2.LINE_AA,
+            )
+            lbl = "RESET"
+            f_dup = cv2.FONT_HERSHEY_DUPLEX
+            sc = 0.58 * sf
+            thk = max(1, int(2 * sf))
+            (tw, th), _ = cv2.getTextSize(lbl, f_dup, sc, thk)
+            tx = rx0 + max(0, (rx1 - rx0 - tw) // 2)
+            ty = ry0 + (ry1 - ry0 + th) // 2
+            cv2.putText(frame, lbl, (tx, ty), f_dup, sc, RESET_BTN_TEXT, thk, cv2.LINE_AA)
         if self.suggestions:
-            subhint = "Pick a reply: 1 / 2 / 3 blinks  |  4 blinks = cancel"
+            subhint = "Pick reply: 1/2/3 blinks  |  4 blinks = cancel  |  RESET + blink"
         elif not self.input_enabled:
             subhint = (
-                "Idle  |  3 blinks = unlock typing  |  mic listens for context when enabled"
-            )
+                "Idle  |  3 blinks = unlock  |  Mic: R-wink ~{:.0f}s = ON  |  RESET + blink"
+            ).format(self.wink_mic_hold_s)
         else:
             subhint = (
-                "Blink on key = type  |  Eyes closed ~{:.0f}s = confirm/send  |  DEL = backspace"
+                "Blink = type  |  {:.0f}s eyes closed = send  |  Mic  |  DEL  |  RESET = look + blink"
             ).format(self.infer_confirm_hold_s)
         cv2.putText(
             frame,
@@ -690,7 +897,7 @@ class GazeKeyboard:
                     (badge_cx - tw // 2, badge_cy + th_t // 3),
                     cv2.FONT_HERSHEY_DUPLEX,
                     1.0 * sf,
-                    (30, 30, 35),
+                    CHAT_ON_ACCENT,
                     2,
                     cv2.LINE_AA,
                 )
@@ -718,8 +925,8 @@ class GazeKeyboard:
                     )
                     y_txt += int(22 * sf)
             foot = (
-                "4 quick blinks = cancel  |  pause after last blink: "
-                "~0.55s for 2-3 blinks, ~1.35s if only 1 blink (option 1)"
+                "4 quick blinks = cancel  |  after last blink wait ~0.55s (2-3 opts) "
+                f"or ~{_SUGGEST_SINGLE_BLINK_CONFIRM_S:.1f}s if only 1 blink (opt 1)"
             )
             cv2.putText(
                 frame,
@@ -759,17 +966,24 @@ class GazeKeyboard:
                 )
                 y_line += 28 * sf
             if self.spoken_buffer is not None:
+                wh = max(0.25, float(self.wink_mic_hold_s))
+                rprog = min(wh, self.mic_wink_r_progress_s)
+                lprog = min(wh, self.mic_wink_l_progress_s)
+                mic_lbl = (
+                    f"Voice (mic): {'ON' if self.mic_capture_enabled else 'OFF'}  |  "
+                    f"R {rprog:.1f}/{wh:.1f}s  L {lprog:.1f}/{wh:.1f}s"
+                )
                 cv2.putText(
                     frame,
-                    "Voice (mic)",
+                    mic_lbl,
                     (int(16 * sf), int(y_line + 16 * sf)),
                     cv2.FONT_HERSHEY_DUPLEX,
-                    0.52 * sf,
-                    _C_ACCENT2,
+                    0.48 * sf,
+                    _C_ACCENT,
                     max(1, int(2 * sf)),
                     cv2.LINE_AA,
                 )
-                y_line += 36 * sf
+                y_line += 32 * sf
                 for line in self.spoken_buffer.snapshot_lines_for_ui(4):
                     safe = line.encode("ascii", errors="replace").decode("ascii")
                     safe = _truncate(safe, 96)
@@ -837,7 +1051,7 @@ class GazeKeyboard:
                 (int(12 * sf), h - int(9 * sf)),
                 font,
                 0.42 * sf,
-                (160, 210, 180),
+                _C_MUTED,
                 1,
                 cv2.LINE_AA,
             )
