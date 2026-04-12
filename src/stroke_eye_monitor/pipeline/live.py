@@ -20,6 +20,7 @@ from stroke_eye_monitor.core.metrics import (
     smooth_vec2,
 )
 
+from stroke_eye_monitor.ui.brand_theme import CHAT_ACCENT
 from stroke_eye_monitor.ui.drawing import DrawStyle, draw_face_mesh_eyes
 from stroke_eye_monitor.ui.keyboard_overlay import GazeKeyboard
 from LLM.completion import CompletionBackend
@@ -146,7 +147,8 @@ class LiveEyePipeline:
         gy: float,
         sigma_canvas: float | None,
     ) -> None:
-        """Map calibration-canvas gaze to frame pixels and draw mean plus an uncertainty ring."""
+        """Map calibration-canvas gaze to frame pixels and draw a single gaze dot."""
+        _ = sigma_canvas  # kept for call-site compatibility; no uncertainty ring
         cal = self._gaze_cal
         if cal is None or cal.gaze_width < 1 or cal.gaze_height < 1:
             return
@@ -155,11 +157,8 @@ class LiveEyePipeline:
         sy = dh / float(cal.gaze_height)
         px = int(round(gx * sx))
         py = int(round(gy * sy))
-        if sigma_canvas is not None and sigma_canvas > 0:
-            r_sig = max(5, int(round(sigma_canvas * 0.5 * (sx + sy))))
-            cv2.circle(frame, (px, py), r_sig, (0, 200, 255), 2, cv2.LINE_AA)
-        cv2.circle(frame, (px, py), 5, (0, 120, 255), -1, cv2.LINE_AA)
-        cv2.circle(frame, (px, py), 6, (255, 255, 255), 1, cv2.LINE_AA)
+        r = max(3, int(round(3.5 * (sx + sy) * 0.5)))
+        cv2.circle(frame, (px, py), r, CHAT_ACCENT, -1, cv2.LINE_AA)
 
     @property
     def keyboard_session(self) -> KeyboardSession | None:
@@ -187,6 +186,8 @@ class LiveEyePipeline:
             kb.blink.reset()
         except Exception as exc:
             print(f"LLM error: {exc}", flush=True)
+            with self._llm_lock:
+                kb.keyboard.set_suggestions([])
         finally:
             with self._llm_lock:
                 kb.keyboard.block_input = False
@@ -282,6 +283,34 @@ class LiveEyePipeline:
                         )
                     else:
                         self._pointer_gx, self._pointer_gy = self._sm_gx, self._sm_gy
+            elif self._kbd is not None and self._sm_gx is not None and self._sm_gy is not None:
+                # EAR below gaze gate (e.g. mid-blink): keep last smoothed point so hit-test
+                # and blink-to-type stay aligned with where the user was looking.
+                kbd_gx = float(self._sm_gx)
+                kbd_gy = float(self._sm_gy)
+                if self._kbd_median_n >= 3 and len(self._kbd_sm_buf) >= 1:
+                    arr = np.asarray(self._kbd_sm_buf, dtype=np.float64)
+                    kbd_gx = float(np.median(arr[:, 0]))
+                    kbd_gy = float(np.median(arr[:, 1]))
+                b = self._kbd.keyboard.layout_bounds()
+                if (
+                    b is not None
+                    and self._gaze_cal is not None
+                    and abs(self._kbd_gain - 1.0) > 1e-6
+                ):
+                    minx, maxx, miny, maxy = b
+                    cx = 0.5 * (float(minx) + float(maxx))
+                    cy = 0.5 * (float(miny) + float(maxy))
+                    kbd_gx = cx + self._kbd_gain * (kbd_gx - cx)
+                    kbd_gy = cy + self._kbd_gain * (kbd_gy - cy)
+                    gw = float(self._gaze_cal.gaze_width)
+                    gh = float(self._gaze_cal.gaze_height)
+                    kbd_gx = float(np.clip(kbd_gx, 0.0, gw - 1.0))
+                    kbd_gy = float(np.clip(kbd_gy, 0.0, gh - 1.0))
+                self._kbd.keyboard.update_gaze(kbd_gx, kbd_gy)
+                self._pointer_gx, self._pointer_gy = (
+                    self._kbd.keyboard.pointer_gaze_for_display()
+                )
 
             if self._sm_gx is not None and self._sm_gy is not None:
                 sg = self._sm_gaze_sigma
@@ -305,7 +334,7 @@ class LiveEyePipeline:
             kb = self._kbd.keyboard
             avg_ear = (m.left_ear + m.right_ear) / 2.0
 
-            if (not kb.block_input) or kb.reset_hover:
+            if (not kb.block_input) or kb.reset_key_active():
                 if self._kbd.blink.feed(avg_ear):
                     letter = kb.select()
                     if letter is not None:
