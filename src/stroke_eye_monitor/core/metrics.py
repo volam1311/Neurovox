@@ -168,6 +168,12 @@ class BlinkDetector:
         self._cooldown_remaining = 0
         self._is_closed = False
 
+    def reset(self) -> None:
+        """Clear state (e.g. when UI mode changes) so the next reopen is not counted as a blink."""
+        self._closed_count = 0
+        self._cooldown_remaining = 0
+        self._is_closed = False
+
     def feed(self, avg_ear: float) -> bool:
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
