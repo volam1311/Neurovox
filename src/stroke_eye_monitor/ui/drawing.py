@@ -5,6 +5,8 @@ from typing import Any, List, Sequence
 
 import cv2
 from mediapipe.tasks.python.components.containers import landmark as landmark_lib
+
+from stroke_eye_monitor.ui.brand_theme import BRAND_TEAL
 from mediapipe.tasks.python.vision.face_landmarker import FaceLandmarksConnections
 
 Connection = FaceLandmarksConnections.Connection
@@ -53,18 +55,18 @@ def draw_face_mesh_eyes(
             (192, 192, 192),
             1,
         )
-    # Eyes-focused overlay (lower cost than full tessellation)
+    # Eyes-focused overlay (brand teal)
     _draw_connections(
-        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYE, (48, 48, 255), 1
+        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYE, BRAND_TEAL, 1
     )
     _draw_connections(
-        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYE, (48, 255, 48), 1
+        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYE, BRAND_TEAL, 1
     )
     _draw_connections(
-        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS, (0, 215, 255), 2
+        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS, BRAND_TEAL, 2
     )
     _draw_connections(
-        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS, (0, 215, 255), 2
+        frame, landmarks, FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS, BRAND_TEAL, 2
     )
 
 
@@ -86,7 +88,7 @@ def draw_hud(
         (8, y),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
-        (30, 240, 30) if face_ok else (40, 40, 255),
+        BRAND_TEAL if face_ok else (100, 100, 255),
         1,
         cv2.LINE_AA,
     )
@@ -98,7 +100,7 @@ def draw_hud(
             (8, y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
-            (230, 230, 230),
+            (220, 235, 235),
             1,
             cv2.LINE_AA,
         )
