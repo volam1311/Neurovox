@@ -33,15 +33,18 @@ from sklearn.model_selection import GroupKFold
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.feature_selection import SequentialFeatureSelector
+from sklearn.linear_model import LinearRegression
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
 
-FEATURE_COLS = [f"f{i}" for i in range(11)]
+FEATURE_COLS = [f"f{i}" for i in range(17)]
 TARGET_COLS = ["target_x", "target_y"]
 PLOT_DIR = Path("plots")
 
 MODEL_COLORS_BGR = {
     "Ridge":             (180, 114, 76),
+    "Stepwise Linear":   (150, 150, 70),
     "SVR":               (82, 132, 221),
     "XGBoost":           (104, 168, 85),
     "Gradient Boosting": (82, 78, 196),
@@ -49,6 +52,7 @@ MODEL_COLORS_BGR = {
 }
 MODEL_COLORS_RGB = {
     "Ridge":             "#4C72B0",
+    "Stepwise Linear":   "#4A90E2",
     "SVR":               "#DD8452",
     "XGBoost":           "#55A868",
     "Gradient Boosting": "#C44E52",
@@ -63,6 +67,11 @@ def _make_models() -> dict[str, Pipeline]:
             ("scale", StandardScaler()),
             ("poly", PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)),
             ("model", Ridge(alpha=1.0)),
+        ]),
+        "Stepwise Linear": Pipeline([
+            ("scale", StandardScaler()),
+            ("stepwise", SequentialFeatureSelector(LinearRegression(), n_features_to_select="auto", tol=1e-3, cv=3)),
+            ("model", LinearRegression()),
         ]),
         "SVR": Pipeline([
             ("scale", StandardScaler()),

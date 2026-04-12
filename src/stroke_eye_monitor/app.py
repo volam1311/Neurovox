@@ -32,11 +32,11 @@ def _load_gaze_calibration(
         )
         return None, 1
     gaze_cal = GazeCalibration.load(gp)
-    if gaze_cal.feature_dim != 11:
+    if gaze_cal.feature_dim != 17:
         print(
             "This gaze_calibration.json doesn't match the current gaze model. "
-            "Run --calibrate again to regenerate (expects 11 features: iris offsets, "
-            "head rotation vector, head translation vector, bias).",
+            "Run --calibrate again to regenerate (expects 17 features: iris offsets, "
+            "head rotations + sin/cos expansions, head translation, bias).",
             file=sys.stderr,
         )
         return None, 1

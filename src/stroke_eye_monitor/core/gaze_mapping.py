@@ -11,15 +11,16 @@ from typing import Any
 import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.model_selection import KFold, LeaveOneOut
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.feature_selection import SequentialFeatureSelector
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
 
-_MODEL_CHOICES = ("auto", "ridge", "poly", "svr", "gbr", "xgboost", "rf")
+_MODEL_CHOICES = ("auto", "ridge", "stepwise", "poly", "svr", "gbr", "xgboost", "rf")
 
 # Above this many training rows, use shuffled K-fold instead of leave-one-out (speed).
 _GAZE_CV_LOO_MAX_N: int = 80
@@ -61,6 +62,13 @@ def _build_candidates(
         "ridge": Pipeline([
             ("scaler", StandardScaler()),
             ("reg", Ridge(alpha=alpha)),
+        ]),
+        "stepwise": Pipeline([
+            ("scaler", StandardScaler()),
+            ("sfs", SequentialFeatureSelector(
+                LinearRegression(), n_features_to_select="auto", tol=1e-3, cv=3
+            )),
+            ("reg", LinearRegression()),
         ]),
         "poly": Pipeline([
             ("scaler", StandardScaler()),
@@ -123,6 +131,28 @@ def _build_candidates(
             )),
         ]),
     }
+
+
+def _extract_model_parameters(pipeline: Pipeline) -> dict[str, Any]:
+    """Extract linear coefficients into a JSON-serializable dictionary."""
+    if not isinstance(pipeline, Pipeline):
+        return {}
+    params: dict[str, Any] = {}
+    reg = pipeline.named_steps.get("reg")
+    if reg is None:
+        return params
+
+    if hasattr(reg, "coef_"):
+        coef = np.asarray(reg.coef_)
+        if coef.ndim == 2 and coef.shape[0] >= 2:
+            params["coeff_x"] = coef[0].tolist()
+            params["coeff_y"] = coef[1].tolist()
+        if hasattr(reg, "intercept_"):
+            inter = np.asarray(reg.intercept_)
+            if inter.size >= 2:
+                params["intercept_x"] = float(inter[0])
+                params["intercept_y"] = float(inter[1])
+    return params
 
 
 def _loo_cv_error(pipeline: Pipeline, F: np.ndarray, Y: np.ndarray) -> float:
@@ -220,7 +250,7 @@ class GazeCalibration:
 
     gaze_width: int
     gaze_height: int
-    feature_dim: int = 11
+    feature_dim: int = 17
     model_type: str = "ridge"
 
     coeff_x: list[float] = field(default_factory=list)
@@ -228,6 +258,9 @@ class GazeCalibration:
 
     #: Mean cross-validated Euclidean error (px); LOO if few rows, K-fold if many.
     loo_cv_px: float | None = None
+
+    parameters: dict[str, Any] = field(default_factory=dict)
+    alternative_models: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     _pipeline: Any = field(default=None, repr=False)
 
@@ -281,6 +314,8 @@ class GazeCalibration:
                 "feature_dim": self.feature_dim,
                 "model_type": self.model_type,
                 "model_blob": blob,
+                "parameters": self.parameters,
+                "alternative_models": self.alternative_models,
             }
             if self.loo_cv_px is not None:
                 d["loo_cv_px"] = float(self.loo_cv_px)
@@ -299,7 +334,7 @@ class GazeCalibration:
         version = int(d.get("version", 6))
         gw = int(d["gaze_width"])
         gh = int(d["gaze_height"])
-        fd = int(d.get("feature_dim", 11))
+        fd = int(d.get("feature_dim", 17))
 
         if version >= 7 and "model_blob" in d:
             blob = base64.b64decode(d["model_blob"])
@@ -311,7 +346,9 @@ class GazeCalibration:
                 feature_dim=fd,
                 model_type=str(d.get("model_type", "unknown")),
                 loo_cv_px=float(loo) if loo is not None else None,
+                alternative_models=d.get("alternative_models", {}),
             )
+            cal.parameters = d.get("parameters", {})
             cal._pipeline = pipeline
             return cal
 
@@ -391,6 +428,8 @@ def fit_gaze_model(
 
     candidates = _build_candidates(ridge_lambda, n_samples=len(feature_rows))
 
+    alternatives: dict[str, dict[str, Any]] = {}
+
     if model != "auto":
         if model not in candidates:
             raise ValueError(f"Unknown model '{model}'. Choose from: {list(candidates)}")
@@ -424,12 +463,25 @@ def fit_gaze_model(
         chosen_pipe.fit(F, Y)
         err = float(best_err)
 
+        for name, alt_err, _ in results:
+            if name != chosen_name:
+                alt_pipe = candidates[name]
+                alt_pipe.fit(F, Y)
+                blob = base64.b64encode(pickle.dumps(alt_pipe)).decode("ascii")
+                alternatives[name] = {
+                    "model_blob": blob,
+                    "loo_cv_px": float(alt_err),
+                    "parameters": _extract_model_parameters(alt_pipe),
+                }
+
     cal = GazeCalibration(
         gaze_width=gaze_width,
         gaze_height=gaze_height,
         feature_dim=int(F.shape[1]),
         model_type=chosen_name,
         loo_cv_px=float(err),
+        alternative_models=alternatives,
     )
+    cal.parameters = _extract_model_parameters(chosen_pipe)
     cal._pipeline = chosen_pipe
     return cal
