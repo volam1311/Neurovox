@@ -1,0 +1,81 @@
+# Build a Windows .exe and attach it to a GitHub Release when you push a version tag (e.g. v0.1.1).
+#
+#   git tag v0.1.1
+#   git push origin v0.1.1
+#
+# Requires: repo Settings → Actions → General → Workflow permissions → Read and write.
+
+name: Release (Windows exe)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project and PyInstaller
+        run: |
+          python -m pip install -U pip wheel
+          pip install -e .
+          pip install "pyinstaller>=6.0"
+
+      - name: Build one-file executable
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -eq "") { $tag = "dev" }
+          pyinstaller --noconfirm --clean `
+            --onefile `
+            --name "NeurovoxStrokeEyeMonitor-${tag}" `
+            --collect-all mediapipe `
+            --collect-all cv2 `
+            --collect-all sklearn `
+            --collect-all xgboost `
+            --hidden-import=certifi `
+            --hidden-import=dotenv `
+            --hidden-import=sounddevice `
+            --hidden-import=openai `
+            --hidden-import=pandas `
+            --hidden-import=LLM `
+            --hidden-import=LLM.openai_backend `
+            --hidden-import=LLM.completion `
+            --hidden-import=LLM.env `
+            --hidden-import=LLM.audio_platform `
+            --hidden-import=LLM.stt_whisper `
+            scripts/windows_entry.py
+
+      - name: Upload artifact (workflow run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeurovoxStrokeEyeMonitor-windows
+          path: dist/*.exe
+
+      - name: Create GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

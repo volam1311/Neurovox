@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stroke-eye-monitor"
-version = "0.1.0"
+version = "0.1.1"
 description = "Webcam eye/iris tracking and optional gaze calibration with MediaPipe Face Landmarker"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -25,6 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 audio = [
     "soundcard>=0.4.2,<1",
+]
+dev = [
+    "pyinstaller>=6.0,<7",
 ]
 
 [project.scripts]

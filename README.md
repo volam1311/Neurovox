@@ -19,6 +19,14 @@
 
 ---
 
+## Download (Windows `.exe`)
+
+Prebuilt **Windows** executables are published on **GitHub Releases** when a maintainer pushes a version tag (for example `v0.1.1`). See **[`RELEASE.md`](RELEASE.md)** for the exact release steps and a local PyInstaller command.
+
+Run the downloaded `.exe` like the CLI below; the first launch may download MediaPipe model files. Configure **API keys** (OpenAI, etc.) via a `.env` file next to the executable or your working directory, as described in this README.
+
+---
+
 ## Quick start
 
 ```bash
