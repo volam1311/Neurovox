@@ -29,22 +29,18 @@ from stroke_eye_monitor.ui.brand_theme import (
     CHAT_ACCENT,
     CHAT_ACCENT_SOFT,
     CHAT_ON_ACCENT,
-    RESET_BTN_BORDER,
-    RESET_BTN_FILL,
-    RESET_BTN_HI,
-    RESET_BTN_TEXT,
 )
 
 # From origin/main: gaze-model-aware geometry + robust hit testing (eye_dimension stack).
 _HIT_PAD_FRAC = 0.14
 _KEY_MAX_WIDTH_OVER_HEIGHT = 1.32
-_KEY_GAP_FRAC = 0.06
+_KEY_GAP_FRAC = 0.09
 
 # Standard QWERTY; last key is backspace (AAC / inference flow).
 QWERTY_ROWS = [
     list("QWERTYUIOP"),
     list("ASDFGHJKL"),
-    list("ZXCVBNM") + [",", ".", "BKSP"],
+    ["RESET"] + list("ZXCVBNM") + [",", ".", "BKSP"],
 ]
 ROWS = len(QWERTY_ROWS)
 
@@ -125,13 +121,34 @@ _SUGGEST_COMMIT_PAUSE_S = 0.55
 _SUGGEST_SINGLE_BLINK_CONFIRM_S = 2.0
 # Ignore blink edges for this long after suggestions appear (avoids spurious pick from UI transition).
 _SUGGEST_BLINK_ARM_DELAY_S = 1.6
+# If the user does not pick a suggestion (or reset), return to typing after this many seconds.
+_SUGGEST_AUTO_DISMISS_S = 75.0
 
 
 def _key_face_label(letter: str) -> str:
-    """Short label for on-screen key cap (OpenCV font)."""
+    """Label for on-screen key cap (OpenCV font)."""
     if letter == "BKSP":
         return "DEL"
+    if letter == "RESET":
+        return "RESET"
     return letter
+
+
+def _key_face_scale_for_label(
+    label: str,
+    font: int,
+    thick: int,
+    max_text_w: int,
+    base_scale: float,
+) -> float:
+    """Shrink scale so the full label fits within max_text_w (e.g. RESET on a narrow key)."""
+    s = float(base_scale)
+    for _ in range(14):
+        tw, _ = cv2.getTextSize(label, font, s, thick)[0]
+        if tw <= max_text_w and s >= 0.42:
+            return s
+        s *= 0.9
+    return max(0.42, s)
 
 
 def _truncate(s: str, max_chars: int) -> str:
@@ -139,11 +156,6 @@ def _truncate(s: str, max_chars: int) -> str:
     if len(s) <= max_chars:
         return s
     return s[: max(0, max_chars - 1)] + "..."
-
-
-def _point_in_rect(gx: float, gy: float, rect: tuple[int, int, int, int]) -> bool:
-    x0, y0, x1, y1 = rect
-    return x0 <= gx <= x1 and y0 <= gy <= y1
 
 
 @dataclass
@@ -198,6 +210,7 @@ class GazeKeyboard:
     # After LLM: blink 1x / 2x / 3x to pick option; 4x = dismiss
     _suggest_blink_ts: list[float] = field(default_factory=list)
     _suggest_armed_at: float = field(default=0.0, repr=False)
+    _suggest_deadline: float = field(default=0.0, repr=False)
 
     on_sentence_chosen: Callable[[str], None] | None = None
     spoken_buffer: Any = None
@@ -207,18 +220,16 @@ class GazeKeyboard:
         repr=False,
     )
     _gaze_model_label: str = field(default="", repr=False)
-    # Header "RESET" hit box (layout px); gaze + blink returns to typing.
-    _reset_rect: tuple[int, int, int, int] | None = field(default=None, repr=False)
-    _reset_hover: bool = field(default=False, repr=False)
     _blink: Any = field(default=None, repr=False, init=False)
 
     def attach_blink(self, blink: Any) -> None:
         """Optional blink detector ref so Reset can clear edge state without importing here."""
         self._blink = blink
 
-    @property
-    def reset_hover(self) -> bool:
-        return bool(self._reset_hover)
+    def reset_key_active(self) -> bool:
+        if not (0 <= self._active_cell < len(self.cells)):
+            return False
+        return self.cells[self._active_cell].letter == "RESET"
 
     def reset_infer_confirm_accum(self) -> None:
         self._infer_confirm_accum_s = 0.0
@@ -238,12 +249,29 @@ class GazeKeyboard:
     ) -> None:
         """Arm/disarm mic capture: right-eye wink (R closed, L open) vs left-eye wink to stop."""
         hold = max(0.25, float(hold_s))
-        if l_ear <= close_t and r_ear <= close_t:
+        ct = float(close_t)
+        ot = float(open_t)
+        # One-sided winks rarely match global blink thresholds: the open eye often sits
+        # between close_t and open_t. Use peer_min + asymmetry instead of l>=open_t only.
+        peer_min = max(ct * 0.95, (ct + ot) * 0.5 - 0.02)
+        closed_max = ct + 0.03
+        asym = 0.018
+        # Left wink (disarm): L-side closure is often weaker on EAR; R peer eye may read lower.
+        peer_min_for_left_wink_peer = max(ct * 0.82, peer_min - 0.035)
+        closed_max_l = ct + 0.055
+        asym_l = 0.01
+
+        if l_ear <= ct and r_ear <= ct:
             self._wink_r_hold_s = 0.0
             self._wink_l_hold_s = 0.0
             return
         if not self.mic_capture_enabled:
-            if r_ear <= close_t and l_ear >= open_t:
+            # Right wink: R lower than L, R near closed, L open enough vs R
+            if (
+                r_ear <= closed_max
+                and l_ear >= peer_min
+                and (l_ear - r_ear) >= asym
+            ):
                 self._wink_r_hold_s += float(dt)
                 self._wink_l_hold_s = 0.0
                 if self._wink_r_hold_s >= hold:
@@ -253,7 +281,18 @@ class GazeKeyboard:
             else:
                 self._wink_r_hold_s = 0.0
         else:
-            if l_ear <= close_t and r_ear >= open_t:
+            # Left wink: primary = relaxed (typical). Fallback = same shape as right-wink arm.
+            left_wink_loose = (
+                l_ear <= closed_max_l
+                and r_ear >= peer_min_for_left_wink_peer
+                and (r_ear - l_ear) >= asym_l
+            )
+            left_wink_tight = (
+                l_ear <= closed_max
+                and r_ear >= peer_min
+                and (r_ear - l_ear) >= asym
+            )
+            if left_wink_loose or left_wink_tight:
                 self._wink_l_hold_s += float(dt)
                 self._wink_r_hold_s = 0.0
                 if self._wink_l_hold_s >= hold:
@@ -297,16 +336,25 @@ class GazeKeyboard:
         return float(self._infer_confirm_accum_s)
 
     def set_suggestions(self, suggestions: list[Any]) -> None:
-        self.suggestions = list(suggestions)[:3]
+        gathered: list[Any] = []
+        for item in list(suggestions)[:3]:
+            t = str(getattr(item, "text", str(item))).strip()
+            if t:
+                gathered.append(item)
+        self.suggestions = gathered
         self._suggest_blink_ts.clear()
         self._blink_timestamps.clear()
         self._infer_confirm_accum_s = 0.0
         self._suggest_armed_at = time.time()
+        self._suggest_deadline = (
+            time.time() + _SUGGEST_AUTO_DISMISS_S if self.suggestions else 0.0
+        )
 
     def _dismiss_suggestions(self) -> None:
         self.suggestions = []
         self._suggest_blink_ts.clear()
         self._active_cell = -1
+        self._suggest_deadline = 0.0
 
     def _apply_pick(self, index: int) -> None:
         if not self.suggestions or index < 0 or index >= len(self.suggestions):
@@ -329,6 +377,7 @@ class GazeKeyboard:
         self.suggestions = []
         self._suggest_blink_ts.clear()
         self._active_cell = -1
+        self._suggest_deadline = 0.0
 
     def _tick_suggestion_blink_resolve(self) -> None:
         if not self.suggestions or self.block_input:
@@ -434,14 +483,6 @@ class GazeKeyboard:
                     )
                 )
 
-        reset_w = max(140, int(cw * 0.19))
-        reset_h = max(32, int(self._chat_title_h * 0.72))
-        reset_x1 = cw - margin_x
-        reset_x0 = reset_x1 - reset_w
-        reset_y0 = int(self._chat_title_h * 0.14)
-        reset_y1 = reset_y0 + reset_h
-        self._reset_rect = (reset_x0, reset_y0, reset_x1, reset_y1)
-
     @staticmethod
     def _cell_center(c: KeyboardCell) -> tuple[float, float]:
         return ((c.x0 + c.x1) * 0.5, (c.y0 + c.y1) * 0.5)
@@ -487,6 +528,9 @@ class GazeKeyboard:
     def hit_test(self, gx: float, gy: float) -> int:
         if not self.cells:
             return -1
+        # Gaze above the keyboard band is conversation/header — do not snap to a key.
+        if float(gy) < float(self._kbd_top):
+            return -1
         loose: list[int] = []
         for i, c in enumerate(self.cells):
             x0, x1, y0, y1 = self._padded_hit_rect(c)
@@ -529,13 +573,20 @@ class GazeKeyboard:
     def update_gaze(self, gx: float, gy: float) -> None:
         self._last_gx = float(gx)
         self._last_gy = float(gy)
-        rr = self._reset_rect
-        self._reset_hover = rr is not None and _point_in_rect(float(gx), float(gy), rr)
         if self.suggestions and not self.block_input:
+            if self._suggest_deadline > 0.0 and time.time() >= self._suggest_deadline:
+                self._dismiss_suggestions()
             self._tick_suggestion_blink_resolve()
-            self._active_cell = -1
-            return
+            if self.suggestions and not self.block_input:
+                idx = self.hit_test(gx, gy)
+                if 0 <= idx < len(self.cells) and self.cells[idx].letter == "RESET":
+                    self._active_cell = idx
+                else:
+                    self._active_cell = -1
+                return
 
+        # Locked (before 3-blink unlock): do not latch gaze to any key — otherwise RESET
+        # stays active and select() handles reset before the unlock blink count.
         if not self.input_enabled:
             self._active_cell = -1
             return
@@ -546,13 +597,13 @@ class GazeKeyboard:
         """Point for gaze overlay: snapped to the active key center when gravity is on."""
         gx = float(self._last_gx if self._last_gx is not None else 0.0)
         gy = float(self._last_gy if self._last_gy is not None else 0.0)
-        if self._reset_hover and self._reset_rect is not None:
-            x0, y0, x1, y1 = self._reset_rect
-            return ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
         if not self.gravity_snap:
             return gx, gy
         if self.suggestions:
+            if self.reset_key_active():
+                return self._cell_center(self.cells[self._active_cell])
             return gx, gy
+        # Before unlock: show raw gaze (no snap to RESET / keys) for reliable 3-blink unlock.
         if not self.input_enabled:
             return gx, gy
         if 0 <= self._active_cell < len(self.cells):
@@ -564,6 +615,7 @@ class GazeKeyboard:
         self.suggestions = []
         self._suggest_blink_ts.clear()
         self._suggest_armed_at = 0.0
+        self._suggest_deadline = 0.0
         self._active_cell = -1
         self.block_input = False
         self.block_overlay_text = "Ready to type"
@@ -579,11 +631,6 @@ class GazeKeyboard:
 
     def select(self) -> str | None:
         """Suggestions: blink count. Else: 3 blinks unlock; blink on key types; infer uses eye closure."""
-        if self._reset_hover:
-            self.user_reset_interface()
-            print(">>> UI reset (Ready to type) <<<", flush=True)
-            return None
-
         if self.suggestions and not self.block_input:
             now = time.time()
             if now < self._suggest_armed_at + _SUGGEST_BLINK_ARM_DELAY_S:
@@ -611,14 +658,12 @@ class GazeKeyboard:
             print(">>> Typing unlocked (3 blinks) <<<", flush=True)
             return None
 
-        ly = self._last_gy
-        if ly is None:
-            ly = self._kbd_top + 1.0
-
-        # Conversation panel: blinks do not type (inference is eyes-closed hold, not gaze).
-        if ly < float(self._kbd_top):
+        if self.reset_key_active():
+            self.user_reset_interface()
+            print(">>> UI reset (Ready to type) <<<", flush=True)
             return None
 
+        # hit_test already returns -1 when gaze is above the keyboard; no extra ly guard.
         # Keyboard: one blink commits the highlighted key.
         self._infer_confirm_accum_s = 0.0
         if 0 <= self._active_cell < len(self.cells):
@@ -627,6 +672,8 @@ class GazeKeyboard:
                 if self.typed:
                     self.typed.pop()
                 return "BKSP"
+            if cell.letter == "RESET":
+                return None
             self.typed.append(cell.letter)
             return cell.letter
         return None
@@ -687,9 +734,16 @@ class GazeKeyboard:
                 cv2.rectangle(self._base_image, (ix0, iy0), (ix1, iy1), _C_KEY_INNER, -1)
                 font = cv2.FONT_HERSHEY_DUPLEX
                 cell_px_w = ix1 - ix0
-                scale = max(1.0, min(3.0, cell_px_w / 40.0))
+                inner_w = min(ix1 - ix0, iy1 - iy0)
+                max_tw = max(8, int(inner_w * 0.88))
+                base_scale = max(1.0, min(3.0, cell_px_w / 40.0))
                 thick = max(2, min(7, int(round(cell_px_w / 22.0))))
                 cap_label = _key_face_label(cell.letter)
+                scale = (
+                    _key_face_scale_for_label(cap_label, font, thick, max_tw, base_scale)
+                    if len(cap_label) > 3
+                    else base_scale
+                )
                 (tw, th_t), _ = cv2.getTextSize(cap_label, font, scale, thick)
                 tx = (ix0 + ix1) // 2 - tw // 2
                 ty = (iy0 + iy1) // 2 + th_t // 2
@@ -706,11 +760,14 @@ class GazeKeyboard:
 
         overlay = self._base_image.copy()
 
-        if (
-            self.input_enabled
-            and not self.block_input
-            and 0 <= self._active_cell < len(self.cells)
-        ):
+        _key_hl = False
+        if 0 <= self._active_cell < len(self.cells):
+            _ac = self.cells[self._active_cell]
+            if _ac.letter == "RESET":
+                _key_hl = True
+            elif self.input_enabled and not self.block_input and not self.suggestions:
+                _key_hl = True
+        if _key_hl:
             cell = self.cells[self._active_cell]
             dx0, dy0 = int(round(cell.x0 * sx)), int(round(cell.y0 * sy))
             dx1, dy1 = int(round(cell.x1 * sx)), int(round(cell.y1 * sy))
@@ -729,20 +786,33 @@ class GazeKeyboard:
             cv2.rectangle(overlay, (ix0, iy0), (ix1, iy1), _C_KEY_INNER, -1)
             font = cv2.FONT_HERSHEY_DUPLEX
             cell_px_w = ix1 - ix0
-            scale = max(1.0, min(3.0, cell_px_w / 40.0))
+            inner_w = min(ix1 - ix0, iy1 - iy0)
+            max_tw = max(8, int(inner_w * 0.88))
+            base_scale = max(1.0, min(3.0, cell_px_w / 40.0))
             thick = min(max(3, min(8, int(round(cell_px_w / 20.0)))) + 1, 9)
             cap_label = _key_face_label(cell.letter)
+            scale = (
+                _key_face_scale_for_label(cap_label, font, thick, max_tw, base_scale)
+                if len(cap_label) > 3
+                else base_scale
+            )
             (tw, th_t), _ = cv2.getTextSize(cap_label, font, scale, thick)
             tx = (ix0 + ix1) // 2 - tw // 2
             ty = (iy0 + iy1) // 2 + th_t // 2
             cv2.putText(overlay, cap_label, (tx, ty), font, scale, _C_ACCENT2, thick, cv2.LINE_AA)
-            type_lbl = "type"
+            if cell.letter == "BKSP":
+                type_lbl = "del"
+            elif cell.letter == "RESET":
+                type_lbl = "blink"
+            else:
+                type_lbl = "type"
+            hint_scale = 0.38 * scale if cell.letter != "RESET" else max(0.28, 0.32 * scale)
             cv2.putText(
                 overlay,
                 type_lbl,
                 (ix0 + 4, iy1 - 6),
                 font,
-                0.38 * scale,
+                hint_scale,
                 _C_MUTED,
                 1,
                 cv2.LINE_AA,
@@ -756,6 +826,10 @@ class GazeKeyboard:
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         sf = max(0.45, h / 1080.0)
+        # Modest bump over f327888 baseline (was non-clipping); scale line steps by the same factor.
+        _ds = 1.1
+        # Bring status / hints closer to the main typed line size (was visually tiny vs. input).
+        _bal = 1.22
 
         kbd_top_px = self._scaled(self._kbd_top, sy)
         title_h_px = self._scaled(self._chat_title_h, sy)
@@ -770,74 +844,53 @@ class GazeKeyboard:
             "Conversation",
             (int(18 * sf), int(title_h_px * 0.72)),
             cv2.FONT_HERSHEY_DUPLEX,
-            0.72 * sf,
+            0.72 * sf * _ds * _bal,
             _C_TEXT,
             max(1, int(2 * sf)),
             cv2.LINE_AA,
         )
-        if self._reset_rect is not None:
-            x0, y0, x1, y1 = self._reset_rect
-            rx0 = int(round(x0 * sx))
-            ry0 = int(round(y0 * sy))
-            rx1 = int(round(x1 * sx))
-            ry1 = int(round(y1 * sy))
-            fill = RESET_BTN_HI if self._reset_hover else RESET_BTN_FILL
-            cv2.rectangle(frame, (rx0, ry0), (rx1, ry1), fill, -1)
-            cv2.rectangle(
-                frame,
-                (rx0, ry0),
-                (rx1, ry1),
-                RESET_BTN_BORDER,
-                max(2, int(2 * sf)),
-                cv2.LINE_AA,
-            )
-            lbl = "RESET"
-            f_dup = cv2.FONT_HERSHEY_DUPLEX
-            sc = 0.58 * sf
-            thk = max(1, int(2 * sf))
-            (tw, th), _ = cv2.getTextSize(lbl, f_dup, sc, thk)
-            tx = rx0 + max(0, (rx1 - rx0 - tw) // 2)
-            ty = ry0 + (ry1 - ry0 + th) // 2
-            cv2.putText(frame, lbl, (tx, ty), f_dup, sc, RESET_BTN_TEXT, thk, cv2.LINE_AA)
         if self.suggestions:
-            subhint = "Pick reply: 1/2/3 blinks  |  4 blinks = cancel  |  RESET + blink"
+            subhint = (
+                "1/2/3 blinks = pick reply | 4 blinks = cancel | "
+                "RESET (bottom row) + blink"
+            )
         elif not self.input_enabled:
             subhint = (
-                "Idle  |  3 blinks = unlock  |  Mic: R-wink ~{:.0f}s = ON  |  RESET + blink"
+                "3 blinks = unlock | Mic: hold right wink ~{:.0f}s | RESET + blink"
             ).format(self.wink_mic_hold_s)
         else:
             subhint = (
-                "Blink = type  |  {:.0f}s eyes closed = send  |  Mic  |  DEL  |  RESET = look + blink"
+                "Blink keys to type | Close eyes ~{:.0f}s to send | "
+                "Mic | DEL | RESET"
             ).format(self.infer_confirm_hold_s)
         cv2.putText(
             frame,
             subhint,
             (int(14 * sf), int(title_h_px + 18 * sf)),
-            font,
-            0.48 * sf,
-            _C_MUTED,
-            1,
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.58 * sf * _ds * _bal,
+            _C_TEXT,
+            max(1, int(2 * sf)),
             cv2.LINE_AA,
         )
 
-        body_y0 = int(title_h_px + 36 * sf)
+        body_y0 = int(title_h_px + 42 * sf * _ds)
 
         if self.block_input:
             pad = int(14 * sf)
             status = self.block_overlay_text or "Please wait..."
-            y = body_y0 + int(22 * sf)
-            (tw, _), _ = cv2.getTextSize(status, font, 0.62 * sf, max(1, int(2 * sf)))
+            y = body_y0 + int(22 * sf * _ds)
             cv2.putText(
                 frame,
                 status,
                 (pad, y),
                 font,
-                0.62 * sf,
+                0.62 * sf * _ds * _bal,
                 _C_ACCENT2,
                 max(1, int(2 * sf)),
                 cv2.LINE_AA,
             )
-            y += int(30 * sf)
+            y += int(30 * sf * _ds)
             if self.tts_spoken_text:
                 spoken = self.tts_spoken_text.encode("ascii", errors="replace").decode("ascii")
                 max_c = max(24, int((w - 2 * pad) / (7 * sf)))
@@ -847,31 +900,31 @@ class GazeKeyboard:
                         line,
                         (pad, y),
                         font,
-                        0.58 * sf,
+                        0.58 * sf * _ds * _bal,
                         _C_TYPED,
                         max(1, int(2 * sf)),
                         cv2.LINE_AA,
                     )
-                    y += int(26 * sf)
+                    y += int(26 * sf * _ds)
                     if y > kbd_top_px - int(12 * sf):
                         break
         elif self.suggestions:
-            pad = int(14 * sf)
+            pad = int(20 * sf)
             suggest_top = body_y0
-            suggest_bot = kbd_top_px - int(10 * sf)
-            card_top = int(suggest_top + 8 * sf)
-            card_bot = suggest_bot - int(28 * sf)
+            suggest_bot = kbd_top_px - int(20 * sf)
+            card_top = int(suggest_top + 14 * sf)
+            card_bot = suggest_bot - int(40 * sf)
             n_cards = min(3, len(self.suggestions))
-            gap = int(10 * sf)
+            gap = int(18 * sf)
             inner_w = w - 2 * pad
             card_w = (inner_w - gap * (n_cards - 1)) // max(1, n_cards)
             pending = self.pending_suggest_blink_count
             cv2.putText(
                 frame,
                 "Assistant suggestions",
-                (pad, int(suggest_top + 4 * sf)),
+                (pad, int(suggest_top + 6 * sf)),
                 cv2.FONT_HERSHEY_DUPLEX,
-                0.58 * sf,
+                0.58 * sf * _ds * _bal,
                 _C_ACCENT2,
                 max(1, int(2 * sf)),
                 cv2.LINE_AA,
@@ -904,9 +957,9 @@ class GazeKeyboard:
                 cv2.putText(
                     frame,
                     labels[i],
-                    (x0 + int(12 * sf), card_top + int((card_bot - card_top) * 0.52)),
+                    (x0 + int(14 * sf), card_top + int((card_bot - card_top) * 0.52)),
                     font,
-                    0.48 * sf,
+                    0.48 * sf * _ds * _bal,
                     _C_MUTED,
                     1,
                     cv2.LINE_AA,
@@ -916,74 +969,81 @@ class GazeKeyboard:
                     cv2.putText(
                         frame,
                         line,
-                        (x0 + int(12 * sf), y_txt),
+                        (x0 + int(14 * sf), y_txt),
                         font,
-                        0.52 * sf,
+                        0.52 * sf * _ds * _bal,
                         _C_TEXT,
                         max(1, int(2 * sf)),
                         cv2.LINE_AA,
                     )
-                    y_txt += int(22 * sf)
+                    y_txt += int(26 * sf)
             foot = (
-                "4 quick blinks = cancel  |  after last blink wait ~0.55s (2-3 opts) "
-                f"or ~{_SUGGEST_SINGLE_BLINK_CONFIRM_S:.1f}s if only 1 blink (opt 1)"
+                "4 blinks = cancel | RESET + blink | "
+                f"back to typing in ~{_SUGGEST_AUTO_DISMISS_S:.0f}s if no pick"
             )
             cv2.putText(
                 frame,
                 foot,
-                (pad, suggest_bot - int(8 * sf)),
-                font,
-                0.45 * sf,
-                _C_MUTED,
-                1,
+                (pad, suggest_bot - int(12 * sf)),
+                cv2.FONT_HERSHEY_DUPLEX,
+                0.52 * sf * _ds * _bal,
+                _C_TEXT,
+                max(1, int(2 * sf)),
                 cv2.LINE_AA,
             )
             if pending > 0:
                 cv2.putText(
                     frame,
                     f"Blinks: {pending}",
-                    (w - int(160 * sf), int(suggest_top + 4 * sf)),
+                    (w - int(160 * sf), int(suggest_top + 6 * sf)),
                     font,
-                    0.52 * sf,
+                    0.52 * sf * _ds * _bal,
                     _C_ACCENT2,
                     max(1, int(2 * sf)),
                     cv2.LINE_AA,
                 )
         else:
+            # --- Layout: status strip (top) | left-aligned entry block (vertically centered) | history ---
+            panel_pad = int(12 * sf)
+            panel_bot = kbd_top_px - panel_pad
+            font_dup = cv2.FONT_HERSHEY_DUPLEX
+            x_entry = int(16 * sf)
+
             y_line = float(body_y0)
             if self.input_enabled and not self.block_input and not self.suggestions:
                 hold = max(0.5, float(self.infer_confirm_hold_s))
                 acc = min(hold, self.infer_confirm_accum_s)
                 cv2.putText(
                     frame,
-                    f"Confirm: eyes closed {acc:.1f} / {hold:.1f}s",
+                    f"Send: keep eyes closed {acc:.1f} / {hold:.0f}s",
                     (int(14 * sf), int(y_line + 14 * sf)),
-                    font,
-                    0.52 * sf,
+                    cv2.FONT_HERSHEY_DUPLEX,
+                    0.58 * sf * _ds * _bal,
                     _C_GREEN,
-                    1,
+                    max(1, int(2 * sf)),
                     cv2.LINE_AA,
                 )
-                y_line += 28 * sf
+                y_line += 30 * sf * _ds
             if self.spoken_buffer is not None:
                 wh = max(0.25, float(self.wink_mic_hold_s))
                 rprog = min(wh, self.mic_wink_r_progress_s)
                 lprog = min(wh, self.mic_wink_l_progress_s)
                 mic_lbl = (
-                    f"Voice (mic): {'ON' if self.mic_capture_enabled else 'OFF'}  |  "
-                    f"R {rprog:.1f}/{wh:.1f}s  L {lprog:.1f}/{wh:.1f}s"
+                    f"Mic {'on' if self.mic_capture_enabled else 'off'} - "
+                    f"right wink ~{wh:.0f}s on / left wink off | "
+                    f"R {rprog:.1f}/{wh:.1f}s L {lprog:.1f}/{wh:.1f}s"
                 )
                 cv2.putText(
                     frame,
                     mic_lbl,
                     (int(16 * sf), int(y_line + 16 * sf)),
-                    cv2.FONT_HERSHEY_DUPLEX,
-                    0.48 * sf,
+                    font_dup,
+                    0.58 * sf * _ds * _bal,
                     _C_ACCENT,
                     max(1, int(2 * sf)),
                     cv2.LINE_AA,
                 )
-                y_line += 32 * sf
+                y_line += 34 * sf * _ds
                 for line in self.spoken_buffer.snapshot_lines_for_ui(4):
                     safe = line.encode("ascii", errors="replace").decode("ascii")
                     safe = _truncate(safe, 96)
@@ -992,50 +1052,103 @@ class GazeKeyboard:
                         safe,
                         (int(22 * sf), int(y_line)),
                         font,
-                        0.46 * sf,
+                        0.5 * sf * _ds * _bal,
                         _C_MUTED,
                         1,
                         cv2.LINE_AA,
                     )
-                    y_line += 20 * sf
-                y_line += 8 * sf
+                    y_line += 22 * sf * _ds
+                y_line += 10 * sf * _ds
 
-            cv2.putText(
-                frame,
-                "You (typed)",
-                (int(16 * sf), int(y_line + 16 * sf)),
-                cv2.FONT_HERSHEY_DUPLEX,
-                0.52 * sf,
-                _C_ACCENT,
-                max(1, int(2 * sf)),
-                cv2.LINE_AA,
-            )
-            y_line += 34 * sf
+            y_status_end = y_line
             typed_str = self.typed_text
+            hist_lines: list[str] = []
             for hist_str in self.history[-3:]:
                 hsafe = hist_str.encode("ascii", errors="replace").decode("ascii")
+                hist_lines.append(f"Last: {hsafe}")
+            hist_scale = 0.52 * sf * _ds * _bal
+            line_h_hist = int(24 * sf * _ds)
+
+            you_lbl = "You (typed)"
+            you_scale = 0.56 * sf * _ds * _bal
+            you_th = max(1, int(2 * sf))
+            (tw_u, th_u), bl_u = cv2.getTextSize(you_lbl, font_dup, you_scale, you_th)
+            visual_gap = int(18 * sf * _ds)
+
+            typed_scale = 0.78 * sf * _ds
+            typed_th = max(1, int(2 * sf))
+            if typed_str:
+                typed_line = typed_str + "_"
+                (tw_t, th_t), bl_t = cv2.getTextSize(typed_line, font, typed_scale, typed_th)
+                block_h = float(visual_gap + th_u + th_t)
+            else:
+                (tw_t, th_t), bl_t = (0, 0), 0
+                typed_line = ""
+                block_h = float(th_u)
+
+            margin_after_status = int(22 * sf * _ds)
+            hist_total_h = len(hist_lines) * line_h_hist + int(10 * sf)
+            avail_top = float(y_status_end + margin_after_status)
+            avail_bot = float(panel_bot - hist_total_h - int(8 * sf))
+            region_h = max(0.0, avail_bot - avail_top)
+
+            if region_h < block_h + 4:
+                block_top = avail_top
+            else:
+                block_top = avail_top + (region_h - block_h) / 2.0
+
+            baseline_you = int(block_top + (th_u - bl_u))
+            cv2.putText(
+                frame,
+                you_lbl,
+                (x_entry, baseline_you),
+                font_dup,
+                you_scale,
+                _C_ACCENT,
+                you_th,
+                cv2.LINE_AA,
+            )
+
+            if typed_str:
+                baseline_typed = int(
+                    baseline_you + bl_u + visual_gap + (th_t - bl_t)
+                )
                 cv2.putText(
                     frame,
-                    f"Last: {hsafe}",
-                    (int(22 * sf), int(y_line)),
+                    typed_line,
+                    (x_entry, baseline_typed),
                     font,
-                    0.5 * sf,
+                    typed_scale,
+                    _C_TYPED,
+                    typed_th,
+                    cv2.LINE_AA,
+                )
+                bottom_entry = float(baseline_typed + bl_t)
+            else:
+                bottom_entry = float(baseline_you + bl_u)
+
+            n_hist = len(hist_lines)
+            if n_hist > 0:
+                y_hist = float(panel_bot - n_hist * line_h_hist - int(8 * sf))
+                y_hist = max(y_hist, bottom_entry + int(14 * sf * _ds))
+                y_last = y_hist + float(n_hist - 1) * float(line_h_hist)
+                max_last = float(panel_bot - int(4 * sf))
+                if y_last > max_last:
+                    y_hist -= y_last - max_last
+                    y_hist = max(y_hist, bottom_entry + int(14 * sf * _ds))
+
+            for hline in hist_lines:
+                cv2.putText(
+                    frame,
+                    hline,
+                    (int(22 * sf), int(y_hist)),
+                    font,
+                    hist_scale,
                     _C_MUTED,
                     1,
                     cv2.LINE_AA,
                 )
-                y_line += 22 * sf
-            if typed_str:
-                cv2.putText(
-                    frame,
-                    typed_str + "_",
-                    (int(22 * sf), int(y_line)),
-                    font,
-                    0.72 * sf,
-                    _C_TYPED,
-                    max(1, int(2 * sf)),
-                    cv2.LINE_AA,
-                )
+                y_hist += line_h_hist
 
         coords_parts: list[str] = []
         if left_iris is not None:
