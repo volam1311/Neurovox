@@ -10,7 +10,11 @@ from typing import Any
 from .audio_platform import play_wav_bytes
 from .completion import RankedSuggestion
 from .env import load_llm_env
-from .stt_whisper import is_hallucination_phrase, should_reject_whisper_verbose
+from .stt_whisper import (
+    is_garbage_repetition,
+    is_hallucination_phrase,
+    should_reject_whisper_verbose,
+)
 
 _DEFAULT_RANKED_SYSTEM = textwrap.dedent(
     """\
@@ -21,23 +25,27 @@ _DEFAULT_RANKED_SYSTEM = textwrap.dedent(
     word-initial letters, fragments, common acronyms, or short phonetic approximations
     — often ALL CAPS with no spaces.
 
-    **Primary signal:** The **current fragment** (the typed letters) is the main
-    instruction. Your expansions must **decode that abbreviation** into full sentences.
-    Do **not** replace the fragment with an unrelated sentence that merely fits the
-    transcript or spoken audio.
+    **Mandatory letter alignment (SpeakFaster-style):** Treat the current fragment as an
+    ordered sequence of letters (ignore spaces). Each suggestion sentence MUST be a
+    grammatical English sentence whose **first word** begins with the letter of the
+    fragment; **second word** begins with the second letter; and so on for every letter
+    in the fragment. If the fragment repeats a letter (e.g. QQ), two consecutive words
+    must start with that letter. Case-insensitive matching. Do not skip letters and do
+    not reorder them.
 
-    **Secondary context:** You may receive a **session transcript** (Turn 1, Turn 2, …)
-    and/or **spoken voice** from a microphone. Use these **only** to:
-    - resolve ambiguity (which homonym fits),
-    - keep pronouns/topic continuity,
-    - match tone.
+    If the fragment has N letters, use at least N words (in order) that satisfy this
+    acrostic (you may add more words after the aligned prefix if needed for clarity).
 
-    If transcript or voice **conflicts** with what the letters could reasonably expand
-    to, **trust the letters** and pick the best expansion of the fragment; do not
-    invent a different message.
+    **Primary signal:** The **typed fragment** is the anchor. Do **not** output a
+    sentence whose first words do not match the letter sequence — even if transcript or
+    voice suggests a different topic.
+
+    **Secondary context:** Session transcript and spoken voice are hints only for
+    wording choice, tone, ambiguity, and continuity. **Never** override the letter
+    alignment to match transcript or audio.
 
     Guidelines:
-    - Rank 1 = most likely expansion of **this fragment**.
+    - Rank 1 = most likely **aligned** expansion of **this fragment**.
     - Each suggestion must be a **complete, natural sentence** ready to be spoken aloud.
     - Keep it concise — one sentence per suggestion unless the abbreviation clearly
       implies more.
@@ -46,6 +54,15 @@ _DEFAULT_RANKED_SYSTEM = textwrap.dedent(
     Output only valid JSON per the schema in the first system block.
     """
 ).strip()
+
+
+def _letter_alignment_hint(fragment: str) -> str:
+    """Human-readable acrostic checklist for the user message."""
+    letters = [c.upper() for c in fragment if c.isalpha()]
+    if not letters:
+        return ""
+    parts = [f"word {i + 1} must start with “{L}”" for i, L in enumerate(letters)]
+    return "; ".join(parts)
 
 
 def _format_session_transcript(
@@ -161,19 +178,19 @@ class OpenAICompletion:
         self._tts_voice = (os.environ.get("OPENAI_TTS_VOICE", "alloy")).strip()
 
     def transcribe_wav(self, wav_bytes: bytes) -> str:
-        """Transcribe mono WAV bytes with Whisper (drops known silence hallucinations).
+        """Transcribe mono WAV bytes with Whisper (filters via env; see ``LLM.stt_whisper``).
 
-        By default only a phrase blocklist is applied. Set ``NEUROVOX_WHISPER_PROB_FILTER=1``
-        to also use verbose_json segment probabilities (stricter; can block real speech).
+        By default uses plain ``text`` only (repetition + optional substring blocklist).
+        Set ``NEUROVOX_WHISPER_PROB_FILTER=1`` to enable ``verbose_json`` and drop chunks
+        using ``no_speech_prob`` / compression ratio (tune with ``NEUROVOX_WHISPER_*``).
+        Set ``OPENAI_WHISPER_LANGUAGE`` (e.g. en) when you only need one language.
         """
         bio = io.BytesIO(wav_bytes)
         bio.name = "chunk.wav"
         lang = (os.environ.get("OPENAI_WHISPER_LANGUAGE") or "").strip() or None
-        use_prob = os.environ.get("NEUROVOX_WHISPER_PROB_FILTER", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+        use_verbose_filter = os.environ.get(
+            "NEUROVOX_WHISPER_PROB_FILTER", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
         kwargs: dict[str, Any] = {
             "model": "whisper-1",
             "file": bio,
@@ -181,11 +198,11 @@ class OpenAICompletion:
         }
         if lang:
             kwargs["language"] = lang
-        if use_prob:
+        if use_verbose_filter:
             kwargs["response_format"] = "verbose_json"
         r = self._client.audio.transcriptions.create(**kwargs)
         text = (r.text or "").strip()
-        if use_prob:
+        if use_verbose_filter:
             segments = getattr(r, "segments", None) or []
             cr_raw = getattr(r, "compression_ratio", None)
             try:
@@ -197,7 +214,7 @@ class OpenAICompletion:
             ):
                 return ""
             return text
-        if is_hallucination_phrase(text):
+        if is_hallucination_phrase(text) or is_garbage_repetition(text):
             return ""
         return text
 
@@ -263,7 +280,8 @@ Schema:
 Rules:
 - Provide up to {k} objects in "suggestions" (ranks 1..{k}).
 - "rank" must be integers 1..{k} with no duplicates.
-- "text" = one natural, speakable sentence expanding the abbreviated input.
+- "text" = one natural, speakable sentence whose **first words** match the typed
+  fragment letters in order (first letter of word 1 = fragment letter 1, etc.).
 - No extra keys. No commentary outside the JSON."""
 
         system = "\n\n".join([json_rules, _DEFAULT_RANKED_SYSTEM])
@@ -284,9 +302,9 @@ Rules:
                     "role": "user",
                     "content": textwrap.dedent(
                         f"""\
-                        ## Spoken voice (secondary — do not override the typed fragment)
-                        Optional background from the room. Use only if it helps interpret
-                        the abbreviation below; ignore if irrelevant or conflicting.
+                        ## Spoken voice (secondary — never overrides letter alignment)
+                        Optional background from the room. Use only to pick synonyms that
+                        still satisfy the fragment’s word-initial letters; ignore if irrelevant.
 
                         \"\"\"{spoken}\"\"\"
                         """
@@ -300,24 +318,32 @@ Rules:
                     "content": textwrap.dedent(
                         f"""\
                         ## Session transcript (secondary context only)
-                        Prior confirmed phrases. Use for continuity; the next message must
-                        still be a direct expansion of the current typed fragment.
+                        Prior confirmed phrases. Use for continuity and tone only; the next
+                        sentences must still match the current fragment’s letter sequence.
 
                         {transcript}
                         """
                     ).strip(),
                 }
             )
+        frag = abbreviated.strip()
+        align = _letter_alignment_hint(frag)
+        align_block = (
+            f"\n\nLetter checklist: {align}\n"
+            if align
+            else "\n\nUse word-initial letters matching the fragment in order.\n"
+        )
         messages.append(
             {
                 "role": "user",
                 "content": textwrap.dedent(
                     f"""\
                     ## Typed fragment — expand THIS (primary)
-                    \"\"\"{abbreviated.strip()}\"\"\"
-
+                    \"\"\"{frag}\"\"\"
+                    {align_block.strip()}
                     Expand into up to {k} ranked full sentences (rank 1 = most likely).
-                    The fragment is the anchor; transcript/voice above are hints only.
+                    Every sentence must satisfy the letter alignment; transcript/voice above
+                    may only adjust wording, not the initials.
                     """
                 ).strip(),
             }

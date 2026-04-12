@@ -113,7 +113,7 @@ class LiveEyePipeline:
         return self._kbd
 
     def _fire_llm(self, abbreviated: str, prior_turns: list[str]) -> None:
-        """Run LLM expansion in a background thread with error recovery."""
+        """Run LLM inference in a background thread with error recovery."""
         kb = self._kbd
         if kb is None:
             return
@@ -202,7 +202,7 @@ class LiveEyePipeline:
                 if self.llm_backend is not None and kb.last_action == "PREDICT":
                     if kb.history:
                         kb.last_action = None
-                        kb.block_overlay_text = "Expanding your message..."
+                        kb.block_overlay_text = "Running inference..."
                         kb.block_input = True
                         text = kb.history[-1]
                         prior = list(kb.history[:-1])

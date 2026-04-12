@@ -378,7 +378,7 @@ class GazeKeyboard:
         elif not self.input_enabled:
             if self.spoken_buffer is not None:
                 hint = (
-                    f"IDLE - mic paused  |  3 blinks = start typing  |  {dwell_ms}ms dwell when typing"
+                    f"IDLE - mic ON for context  |  3 blinks = start typing  |  {dwell_ms}ms dwell when typing"
                 )
             else:
                 hint = (
@@ -386,11 +386,11 @@ class GazeKeyboard:
                 )
         elif self.spoken_buffer is not None:
             hint = (
-                f"Typing - mic ON  |  dwell {dwell_ms}ms  |  gaze DEL = delete  |  3 blinks = AI expand"
+                f"Typing - mic ON  |  dwell {dwell_ms}ms  |  gaze DEL = delete  |  3 blinks = run inference"
             )
         else:
             hint = (
-                f"Typing  |  dwell {dwell_ms}ms  |  gaze DEL = delete  |  3 blinks = AI expand"
+                f"Typing  |  dwell {dwell_ms}ms  |  gaze DEL = delete  |  3 blinks = run inference"
             )
         cv2.putText(
             frame,
@@ -525,11 +525,11 @@ class GazeKeyboard:
             cv2.rectangle(frame, (0, suggest_top), (w, suggest_bot), _C_PANEL, -1)
             cv2.line(frame, (0, suggest_bot - 1), (w, suggest_bot - 1), _C_KEY_EDGE, 1)
             if self.input_enabled:
-                title = "Microphone (sent with next AI expansion)"
-                sub = "Included once when you trigger expand (3 blinks)"
+                title = "Microphone (sent with next inference)"
+                sub = "Included once when you run inference (3 blinks)"
             else:
-                title = "Microphone preview (idle - not recording)"
-                sub = "Unlock typing with 3 blinks, then mic is used for context"
+                title = "Microphone (listening — idle)"
+                sub = "Speak anytime; 3 blinks unlock typing; inference uses speech + letters"
             cv2.putText(
                 frame,
                 title,
