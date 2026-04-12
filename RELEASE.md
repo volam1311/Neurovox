@@ -17,10 +17,10 @@
    ```
 
 4. Open **Actions** → **Release (multi-platform)** → wait for the matrix build (Windows, macOS, Linux) and the **release** job.
-5. Open **Releases** on GitHub: the workflow creates a release for that tag and attaches three files, for example:
-   - `NeurovoxStrokeEyeMonitor-v0.1.1-windows.exe`
-   - `NeurovoxStrokeEyeMonitor-v0.1.1-macos` (executable; run in Terminal: `chmod +x` if needed)
-   - `NeurovoxStrokeEyeMonitor-v0.1.1-linux` (executable)
+5. Open **Releases** on GitHub: the workflow creates a release for that tag and attaches **three downloads** (one per OS), for example:
+   - **Windows:** `NeurovoxStrokeEyeMonitor-v0.1.1-windows.zip` — contains the `.exe` and a short README.
+   - **macOS:** `NeurovoxStrokeEyeMonitor-v0.1.1-macos.zip` — contains **`NeurovoxStrokeEyeMonitor.app`** (double-click in Finder) plus a README.
+   - **Linux:** `NeurovoxStrokeEyeMonitor-v0.1.1-linux.tar.gz` — folder with the binary and `README.txt`.
 
 ## Manual local build (PyInstaller)
 
@@ -40,7 +40,9 @@ pyinstaller --noconfirm --clean --onefile --name "NeurovoxStrokeEyeMonitor-${TAG
   scripts/pyinstaller_entry.py
 ```
 
-On **Windows** (PowerShell), use the same flags with line continuation `` ` `` or a single line. Install **on Windows** to produce `.exe`.
+On **Windows** (PowerShell), use the same flags with line continuation `` ` `` or a single line. Install **on Windows** to produce `.exe`. The CI workflow then zips the `.exe` for distribution; locally you can zip it yourself or run the `.exe` from `dist/`.
+
+**macOS / Linux packaging locally:** After PyInstaller, you can mirror CI: on macOS, place the binary in `NeurovoxStrokeEyeMonitor.app/Contents/MacOS/NeurovoxStrokeEyeMonitor` with `scripts/macos/Info.plist` as `Contents/Info.plist`, then zip the `.app`. On Linux, put the binary and `scripts/release/README-Linux.txt` in a folder and `tar czvf` it.
 
 ## Notes for end users
 

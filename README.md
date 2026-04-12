@@ -21,9 +21,17 @@
 
 ## Download (prebuilt binaries)
 
-**Windows** (`.exe`), **macOS**, and **Linux** one-file builds are published on **GitHub Releases** when a maintainer pushes a version tag (for example `v0.1.1`). Asset names look like `NeurovoxStrokeEyeMonitor-<tag>-windows.exe`, `-macos`, and `-linux`. See **[`RELEASE.md`](RELEASE.md)** for release steps and a local PyInstaller command.
+Published on **GitHub Releases** when a maintainer pushes a version tag (for example `v1.0.0`). Each OS gets a familiar package:
 
-Run the binary from a terminal or file manager; the first launch may download MediaPipe model files. Configure **API keys** (OpenAI, etc.) via a `.env` file in the working directory, as described in this README.
+| OS | Download | What to do |
+|----|----------|------------|
+| **Windows** | `NeurovoxStrokeEyeMonitor-<tag>-windows.zip` | Unzip, run the `.exe` inside. |
+| **macOS** | `NeurovoxStrokeEyeMonitor-<tag>-macos.zip` | Unzip, open **`NeurovoxStrokeEyeMonitor.app`** in Finder. |
+| **Linux** | `NeurovoxStrokeEyeMonitor-<tag>-linux.tar.gz` | Extract, run `./NeurovoxStrokeEyeMonitor` from the folder (see `README.txt` inside). |
+
+See **[`RELEASE.md`](RELEASE.md)** for maintainer release steps and a local PyInstaller command.
+
+The first launch may download MediaPipe model files. Configure **API keys** (OpenAI, etc.) via a `.env` file next to the app or in your working directory, as described below.
 
 ---
 

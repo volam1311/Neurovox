@@ -1,8 +1,9 @@
-# Build PyInstaller one-file bundles for Windows, macOS, and Linux; attach them to a
-# GitHub Release when you push a version tag (e.g. v0.1.1).
+# Build PyInstaller one-file bundles for Windows, macOS, and Linux; package each in a
+# familiar format for that OS (.zip / .app.zip / .tar.gz); attach to a GitHub Release
+# when you push a version tag (e.g. v1.0.0).
 #
-#   git tag v0.1.1
-#   git push origin v0.1.1
+#   git tag v1.0.0
+#   git push origin v1.0.0
 #
 # Requires: repo Settings → Actions → General → Workflow permissions → Read and write.
 
@@ -84,6 +85,81 @@ jobs:
             --hidden-import=LLM.audio_platform \
             --hidden-import=LLM.stt_whisper \
             scripts/pyinstaller_entry.py
+
+      - name: Package (Windows — ZIP with .exe)
+        if: matrix.slug == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          if (-not $tag) { $tag = "dev" }
+          $base = "NeurovoxStrokeEyeMonitor-$tag"
+          $exe = "dist/$base-windows.exe"
+          $zip = "dist/$base-windows.zip"
+          $readme = @"
+          Neurovox Stroke Eye Monitor — Windows
+          --------------------------------
+          1. Extract this ZIP.
+          2. Double-click $base-windows.exe to run.
+
+          If SmartScreen warns, use "More info" then "Run anyway" (unsigned build).
+
+          Put a .env file with API keys next to the .exe or in your working folder; see the project README.
+          "@
+          Set-Content -Path "dist/README-Windows.txt" -Value $readme -Encoding utf8
+          Compress-Archive -Path $exe, "dist/README-Windows.txt" -DestinationPath $zip -Force
+          Remove-Item $exe, "dist/README-Windows.txt" -Force
+
+      - name: Package (macOS — .app in ZIP)
+        if: matrix.slug == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME:-dev}"
+          VER="${TAG#v}"
+          BASE="NeurovoxStrokeEyeMonitor-${TAG}"
+          BIN="${BASE}-macos"
+          APP="NeurovoxStrokeEyeMonitor.app"
+          cd dist
+          mkdir -p "${APP}/Contents/MacOS"
+          cp "${BIN}" "${APP}/Contents/MacOS/NeurovoxStrokeEyeMonitor"
+          chmod +x "${APP}/Contents/MacOS/NeurovoxStrokeEyeMonitor"
+          sed "s/VERSION_PLACEHOLDER/${VER}/g" ../scripts/macos/Info.plist > "${APP}/Contents/Info.plist"
+          zip -r -y "${BASE}-macos.zip" "${APP}"
+          rm -rf "${APP}" "${BIN}"
+          cat > README-macOS.txt <<EOF
+          Neurovox Stroke Eye Monitor — macOS
+          --------------------------------
+          1. Unzip ${BASE}-macos.zip.
+          2. Open NeurovoxStrokeEyeMonitor.app (double-click in Finder).
+
+          If Gatekeeper blocks the app: System Settings → Privacy & Security → Open anyway,
+          or run: xattr -cr NeurovoxStrokeEyeMonitor.app
+          (Only download from official releases; understand the security tradeoff.)
+
+          Camera access is requested at first run (see Info.plist usage string).
+
+          Put a .env file with API keys next to the .app or in your working folder; see the project README.
+          EOF
+          zip -u "${BASE}-macos.zip" README-macOS.txt
+          rm -f README-macOS.txt
+
+      - name: Package (Linux — tar.gz)
+        if: matrix.slug == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME:-dev}"
+          BASE="NeurovoxStrokeEyeMonitor-${TAG}"
+          BIN="${BASE}-linux"
+          PKG="NeurovoxStrokeEyeMonitor-Linux"
+          cd dist
+          mkdir -p "${PKG}"
+          cp "${BIN}" "${PKG}/NeurovoxStrokeEyeMonitor"
+          chmod +x "${PKG}/NeurovoxStrokeEyeMonitor"
+          cp ../scripts/release/README-Linux.txt "${PKG}/README.txt"
+          tar czvf "${BASE}-linux.tar.gz" "${PKG}"
+          rm -rf "${PKG}" "${BIN}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

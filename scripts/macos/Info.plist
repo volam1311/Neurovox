@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>NeurovoxStrokeEyeMonitor</string>
+  <key>CFBundleIdentifier</key>
+  <string>org.neurovox.stroke-eye-monitor</string>
+  <key>CFBundleName</key>
+  <string>Neurovox Stroke Eye Monitor</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>VERSION_PLACEHOLDER</string>
+  <key>CFBundleVersion</key>
+  <string>VERSION_PLACEHOLDER</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSCameraUsageDescription</key>
+  <string>Neurovox Stroke Eye Monitor uses the camera for eye tracking and the on-screen keyboard.</string>
+</dict>
+</plist>
