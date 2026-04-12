@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import statistics
+import csv
+import math
+import os
 import sys
-import time
 from pathlib import Path
 
 import cv2
@@ -11,135 +12,60 @@ import numpy as np
 
 from stroke_eye_monitor.config import MonitorConfig, detect_screen_resolution
 from stroke_eye_monitor.core.detector import FaceMeshEyeDetector
-from stroke_eye_monitor.core.gaze_mapping import GazeCalibration, fit_affine_gaze
-from stroke_eye_monitor.core.metrics import (
-    BlinkDetector,
-    compute_eye_metrics,
-    gaze_feature_vector,
+from stroke_eye_monitor.core.gaze_mapping import (
+    GazeCalibration,
+    _GAZE_CV_LOO_MAX_N,
+    _build_candidates,
+    _gaze_cv_mean_error,
+    fit_gaze_model,
 )
+from stroke_eye_monitor.core.metrics import compute_eye_metrics, gaze_feature_vector
 from stroke_eye_monitor.utils.opencv_canvas import sync_opencv_window_canvas
 
-# 12-point grid: 4x3 (columns x rows), row-major.
-_COL_FRAC = (0.08, 0.36, 0.64, 0.92)
-_ROW_FRAC = (0.10, 0.50, 0.90)
-DEFAULT_TARGETS: list[tuple[float, float]] = [
-    (x, y) for y in _ROW_FRAC for x in _COL_FRAC
-]
-
-
-def _derive_blink_params_from_dwell(dwell_ms: int) -> tuple[float, float, float]:
-    """Fallback burst timing when blink samples are unavailable (derived from dwell only)."""
-    ds = dwell_ms / 1000.0
-    commit = max(0.32, min(0.62, 0.18 + ds * 0.42))
-    window = max(2.0, min(5.5, ds * 6.5 + 0.75))
-    abort = max(2.0, min(6.5, window * 1.08))
-    return window, commit, abort
-
-
-def run_blink_calibration_phase(
+def _fixed_grid_norm_positions(
     *,
-    cap: cv2.VideoCapture,
-    detector: FaceMeshEyeDetector,
-    proc_fn,
-    gaze_width: int,
-    gaze_height: int,
-    dwell_ms: int,
-    blink_close: float,
-    blink_open: float,
-) -> tuple[float, float, float] | None:
-    """Measure three blinks; derive burst window and commit pause. None = user aborted (Q)."""
-    win = "Blink calibration"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(win, gaze_width, gaze_height)
-    try:
-        cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    except cv2.error:
-        pass
+    n_per_side: int,
+    margin: float = 0.06,
+) -> list[tuple[float, float]]:
+    """Evenly spaced normalized (0..1) dots, row-major (top→bottom, left→right)."""
+    lo = float(margin)
+    hi = 1.0 - float(margin)
+    xs = np.linspace(lo, hi, int(n_per_side), dtype=np.float64)
+    ys = np.linspace(lo, hi, int(n_per_side), dtype=np.float64)
+    return [(float(x), float(y)) for y in ys for x in xs]
 
-    gaze_width, gaze_height = sync_opencv_window_canvas(win, gaze_width, gaze_height)
 
-    blink = BlinkDetector(
-        close_threshold=blink_close,
-        open_threshold=blink_open,
-        min_closed_frames=1,
-        cooldown_frames=4,
-    )
-    blink_times: list[float] = []
-    deadline = time.monotonic() + 90.0
+# Fixed 6x6 = 36 targets, inset from edges (reproducible; good screen coverage).
+FIXED_GRID_36_TARGETS: list[tuple[float, float]] = _fixed_grid_norm_positions(n_per_side=6)
 
-    print(
-        "Blink calibration: blink 3 times at your natural pace (quick blinks are OK).",
-        flush=True,
-    )
 
-    while len(blink_times) < 3:
-        if time.monotonic() >= deadline:
-            bw, cp, ia = _derive_blink_params_from_dwell(dwell_ms)
-            print(
-                "Blink calibration timed out; using estimates from dwell timing.",
-                flush=True,
-            )
-            cv2.destroyWindow(win)
-            return bw, cp, ia
-
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            continue
-        proc = proc_fn(frame)
-        result = detector.process_bgr(proc)
-
-        board = np.zeros((gaze_height, gaze_width, 3), dtype=np.uint8)
-        hint = f"Blink 3 times ({len(blink_times)}/3)  Q=abort"
-        cv2.putText(
-            board,
-            hint,
-            (16, 36),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (220, 220, 220),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            board,
-            "Pause briefly after the third blink to confirm",
-            (16, 76),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (180, 180, 180),
-            1,
-            cv2.LINE_AA,
-        )
-
-        if result.landmarks is not None:
-            h0, w0 = result.image_shape
-            m = compute_eye_metrics(result.landmarks, h0, w0)
-            avg_ear = (m.left_ear + m.right_ear) / 2.0
-            if blink.feed(avg_ear):
-                blink_times.append(time.monotonic())
-                print(f"  blink captured {len(blink_times)}/3", flush=True)
-
-        cv2.imshow(win, board)
-        key = cv2.waitKey(1) & 0xFF
-        if key in (27, ord("q")):
-            cv2.destroyWindow(win)
-            return None
-
-    t1, t2, t3 = blink_times[0], blink_times[1], blink_times[2]
-    g12 = t2 - t1
-    g23 = t3 - t2
-    gap_med = statistics.median([g12, g23])
-    span = t3 - t1
-    commit_pause = max(0.28, min(0.68, gap_med * 0.52 + 0.20))
-    burst_window = max(2.0, min(6.0, span + 1.75 * commit_pause))
-    idle_abort = max(2.5, min(7.0, burst_window + 0.35))
-    print(
-        f"Auto-calibrated blink timing: commit pause {commit_pause:.2f}s, "
-        f"burst window {burst_window:.2f}s, idle abort {idle_abort:.2f}s",
-        flush=True,
-    )
-    cv2.destroyWindow(win)
-    return burst_window, commit_pause, idle_abort
+def _random_norm_targets(
+    n: int,
+    *,
+    rng: np.random.Generator,
+    margin: float = 0.06,
+) -> list[tuple[float, float]]:
+    """``n`` normalized (0..1) dot positions with margins and spacing (for diverse calibration)."""
+    if n < 1:
+        raise ValueError("n must be at least 1")
+    lo = margin
+    hi = 1.0 - margin
+    pts: list[tuple[float, float]] = []
+    max_attempts = max(800, n * 600)
+    attempts = 0
+    # Spacing scales with sqrt(n) so ~36 dots remain spread across the canvas.
+    cur_sep = max(0.035, 0.55 / math.sqrt(float(n)))
+    while len(pts) < n and attempts < max_attempts:
+        attempts += 1
+        x = float(rng.uniform(lo, hi))
+        y = float(rng.uniform(lo, hi))
+        if all(math.hypot(x - px, y - py) >= cur_sep for px, py in pts):
+            pts.append((x, y))
+        if attempts % 400 == 0 and cur_sep > 0.035:
+            cur_sep *= 0.88
+    while len(pts) < n:
+        pts.append((float(rng.uniform(lo, hi)), float(rng.uniform(lo, hi))))
+    return pts
 
 
 def run_calibration(
@@ -151,21 +77,30 @@ def run_calibration(
     gaze_height: int,
     out_path: Path,
     targets: list[tuple[float, float]] | None = None,
-    samples_per_point: int = 45,
+    samples_per_point: int = 10,
     ear_min: float = 0.17,
     ridge_lambda: float = 1e-2,
-    blink_close: float = 0.12,
-    blink_open: float = 0.16,
+    gaze_model: str = "auto",
+    use_fixed_grid: bool = False,
+    n_calibration_points: int = 36,
+    calibration_seed: int | None = None,
 ) -> GazeCalibration | None:
     """
-    Show fixation dots on a gaze-sized canvas (12-point grid).
-    User looks at each dot and presses SPACE. Iris offsets from MediaPipe are regressed to dot
-    positions with ridge regression.
-
-    Then: blink calibration (three blinks) to personalize dwell-adjacent burst timing, or
-    timeout/abort handling as documented in ``run_blink_calibration_phase``.
+    Show fixation dots on a gaze-sized canvas (fixed 6x6 grid by default, or random if disabled).
+    User looks at each dot and presses SPACE. Iris features are regressed to dot positions.
     """
-    t_list = targets or DEFAULT_TARGETS
+    if samples_per_point < 1:
+        raise ValueError("samples_per_point must be at least 1")
+
+    if targets is not None:
+        t_list = targets
+    elif use_fixed_grid:
+        t_list = list(FIXED_GRID_36_TARGETS)
+    else:
+        if n_calibration_points < 3:
+            raise ValueError("Need at least 3 calibration points (set --gaze-cal-points >= 3).")
+        rng = np.random.default_rng(calibration_seed)
+        t_list = _random_norm_targets(n_calibration_points, rng=rng)
     win = "Calibration — look at the white dot, press SPACE"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, gaze_width, gaze_height)
@@ -179,10 +114,16 @@ def run_calibration(
         f"Calibration canvas (OpenCV window): {gaze_width} x {gaze_height}",
         flush=True,
     )
+    layout = (
+        "custom list"
+        if targets is not None
+        else ("6x6 fixed grid" if use_fixed_grid else "random")
+    )
+    print(f"Calibration layout: {layout} ({len(t_list)} points)", flush=True)
 
     feature_rows: list[np.ndarray] = []
     screen_xy: list[tuple[float, float]] = []
-    fixation_durations: list[float] = []
+    all_samples: list[tuple[int, np.ndarray, float, float]] = []
 
     for idx, (fx, fy) in enumerate(t_list):
         tx = int(round(fx * (gaze_width - 1)))
@@ -194,7 +135,6 @@ def run_calibration(
 
         collecting = False
         collected: list[np.ndarray] = []
-        fixation_start: float = 0.0
 
         while True:
             ok, frame = cap.read()
@@ -209,8 +149,14 @@ def run_calibration(
             cv2.circle(board, (tx, ty), r_dot + 4, (0, 0, 0), 3, cv2.LINE_AA)
             hint = f"{idx + 1}/{len(t_list)}  SPACE=capture  Q=abort"
             cv2.putText(
-                board, hint, (16, 36),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (220, 220, 220), 2, cv2.LINE_AA,
+                board,
+                hint,
+                (16, 36),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (220, 220, 220),
+                2,
+                cv2.LINE_AA,
             )
 
             if collecting and result.landmarks is not None:
@@ -221,12 +167,16 @@ def run_calibration(
                     if g is not None:
                         collected.append(g.copy())
                 if len(collected) >= samples_per_point:
-                    feat_med = np.median(np.stack(collected, axis=0), axis=0)
-                    feature_rows.append(feat_med)
-                    screen_xy.append((float(tx), float(ty)))
-                    dur = time.monotonic() - fixation_start
-                    fixation_durations.append(dur)
-                    print(f"  captured mean feature, n={len(collected)}, fixation {dur:.2f}s", flush=True)
+                    for sample in collected:
+                        row = sample.copy()
+                        all_samples.append((idx + 1, row, float(tx), float(ty)))
+                        feature_rows.append(row)
+                        screen_xy.append((float(tx), float(ty)))
+                    print(
+                        f"  captured {len(collected)} frames "
+                        f"(each used as a training row; target=({tx},{ty}))",
+                        flush=True,
+                    )
                     break
 
             cv2.imshow(win, board)
@@ -237,48 +187,173 @@ def run_calibration(
             if key in (13, 32):  # Enter or Space
                 collecting = True
                 collected = []
-                fixation_start = time.monotonic()
-
-    # Fixation duration here is mostly time to collect ``samples_per_point`` frames,
-    # not a comfortable key dwell. Scale down and clamp to a short dwell range.
-    if fixation_durations:
-        median_s = statistics.median(fixation_durations)
-        raw_ms = median_s * 1000.0
-        dwell_ms = int(max(260, min(720, raw_ms * 0.36)))
-    else:
-        dwell_ms = 600
-    print(f"Auto-calibrated dwell time: {dwell_ms}ms", flush=True)
 
     cv2.destroyWindow(win)
 
-    blink_out = run_blink_calibration_phase(
-        cap=cap,
-        detector=detector,
-        proc_fn=proc_fn,
-        gaze_width=gaze_width,
-        gaze_height=gaze_height,
-        dwell_ms=dwell_ms,
-        blink_close=blink_close,
-        blink_open=blink_open,
+    # ── save ALL individual samples to CSV for later analysis / plotting ──
+    csv_path = out_path.with_suffix(".csv")
+    _save_calibration_csv(csv_path, all_samples, gaze_width, gaze_height)
+    total = len(all_samples)
+    n_dots = len(t_list)
+    print(
+        f"Saved {total} rows to {csv_path} (raw frames). "
+        f"Fitting maps each of the {n_dots} fixation targets using a per-target median feature "
+        f"(see messages below) so tree models do not overfit duplicate frames.",
+        flush=True,
     )
-    if blink_out is None:
-        return None
-    bw, cp, ia = blink_out
 
-    cal = fit_affine_gaze(
-        feature_rows,
-        screen_xy,
-        gaze_width,
-        gaze_height,
-        ridge_lambda=ridge_lambda,
-        dwell_ms=dwell_ms,
+    if not feature_rows:
+        raise RuntimeError(
+            "No gaze samples were collected (check camera, lighting, and --gaze-ear-min).",
+        )
+
+    # ── evaluate all models and let user choose ──
+    cal = _select_and_fit_model(
+        feature_rows, screen_xy, gaze_width, gaze_height,
+        ridge_lambda=ridge_lambda, preferred_model=gaze_model,
     )
-    cal.blink_burst_window_s = bw
-    cal.blink_commit_pause_s = cp
-    cal.blink_idle_abort_s = ia
     cal.save(out_path)
-    print(f"Saved calibration to {out_path}", flush=True)
+    print(f"Saved calibration ({cal.model_type}) to {out_path}", flush=True)
     return cal
+
+
+def _save_calibration_csv(
+    csv_path: Path,
+    all_samples: list[tuple[int, np.ndarray, float, float]],
+    gaze_width: int,
+    gaze_height: int,
+) -> None:
+    """Save every individual sample (not just medians) for later plotting / model comparison.
+
+    Each row is one frame capture: point_index, sample_index, target, canvas size, features.
+    """
+    if not all_samples:
+        return
+    n_feat = all_samples[0][1].shape[0]
+    header = (
+        ["point_index", "sample_index", "target_x", "target_y",
+         "gaze_canvas_w", "gaze_canvas_h"]
+        + [f"f{i}" for i in range(n_feat)]
+    )
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        sample_counts: dict[int, int] = {}
+        for point_idx, feat, tx, ty in all_samples:
+            sample_counts[point_idx] = sample_counts.get(point_idx, 0) + 1
+            si = sample_counts[point_idx]
+            row = [point_idx, si, tx, ty, gaze_width, gaze_height] + feat.tolist()
+            writer.writerow(row)
+
+
+_MODEL_DISPLAY_NAMES = {
+    "ridge": "Ridge",
+    "stepwise": "Stepwise LR",
+    "poly": "Poly Ridge",
+    "svr": "SVR",
+    "gbr": "Gradient Boosting",
+    "xgboost": "XGBoost",
+    "rf": "Random Forest",
+}
+
+
+def _aggregate_samples_by_target_pixel(
+    feature_rows: list[np.ndarray],
+    screen_xy: list[tuple[float, float]],
+) -> tuple[list[np.ndarray], list[tuple[float, float]]]:
+    """One training row per on-screen target: median feature vector per (tx, ty) pixel.
+
+    Many nearly-identical frames per fixation point confuse tree/boosting models: they
+    memorize label noise and extrapolate wildly at runtime (gaze clamped to a screen corner).
+    Ridge is less affected; aggregation still stabilizes CV and live behaviour.
+    """
+    buckets: dict[tuple[int, int], list[np.ndarray]] = {}
+    for row, (sx, sy) in zip(feature_rows, screen_xy, strict=True):
+        key = (int(round(sx)), int(round(sy)))
+        buckets.setdefault(key, []).append(np.asarray(row, dtype=np.float64).reshape(-1))
+    out_feat: list[np.ndarray] = []
+    out_xy: list[tuple[float, float]] = []
+    for key in sorted(buckets.keys()):
+        arr = np.stack(buckets[key], axis=0)
+        out_feat.append(np.median(arr, axis=0))
+        out_xy.append((float(key[0]), float(key[1])))
+    return out_feat, out_xy
+
+
+def _select_and_fit_model(
+    feature_rows: list[np.ndarray],
+    screen_xy: list[tuple[float, float]],
+    gaze_width: int,
+    gaze_height: int,
+    *,
+    ridge_lambda: float = 1e-2,
+    preferred_model: str = "auto",
+) -> GazeCalibration:
+    """Evaluate all models with CV, print a table, then fit the chosen one."""
+    n_raw = len(feature_rows)
+    feature_rows, screen_xy = _aggregate_samples_by_target_pixel(feature_rows, screen_xy)
+    if len(feature_rows) < n_raw:
+        print(
+            f"Using {len(feature_rows)} unique fixation targets "
+            f"(median of features over {n_raw} captured frames) for model fitting.",
+            flush=True,
+        )
+    if len(feature_rows) < 3:
+        raise RuntimeError(
+            f"Need at least 3 distinct on-screen targets after aggregation; got {len(feature_rows)}. "
+            "Try more calibration points or a larger gaze canvas.",
+        )
+
+    F = np.stack([np.asarray(r, dtype=np.float64).reshape(-1) for r in feature_rows], axis=0)
+    Y = np.array(screen_xy, dtype=np.float64)
+    candidates = _build_candidates(ridge_lambda, n_samples=len(feature_rows))
+
+    results: list[tuple[str, float]] = []
+    cv_kind = "LOO-CV" if F.shape[0] <= _GAZE_CV_LOO_MAX_N else "K-fold CV"
+    print(f"\nEvaluating all models ({cv_kind}, n={F.shape[0]}) …", flush=True)
+    err_hdr = "LOO err (px)" if F.shape[0] <= _GAZE_CV_LOO_MAX_N else "K-fold err (px)"
+    print(f"  {'#':>2s}  {'Model':>20s}  {err_hdr:>18s}")
+    print("  " + "-" * 46)
+
+    for name in candidates:
+        try:
+            err = _gaze_cv_mean_error(candidates[name], F, Y)
+            results.append((name, err))
+        except Exception as exc:
+            results.append((name, float("inf")))
+            print(f"  {'':>2s}  {_MODEL_DISPLAY_NAMES.get(name, name):>20s}  FAILED ({exc})",
+                  file=sys.stderr, flush=True)
+
+    results.sort(key=lambda t: t[1])
+    for i, (name, err) in enumerate(results):
+        display = _MODEL_DISPLAY_NAMES.get(name, name)
+        tag = " <<<" if i == 0 else ""
+        if err == float("inf"):
+            print(f"  {i + 1:>2d}  {display:>20s}  {'FAILED':>18s}")
+        else:
+            print(f"  {i + 1:>2d}  {display:>20s}  {err:>18.1f}{tag}")
+
+    if preferred_model != "auto" and preferred_model in candidates:
+        chosen_name = preferred_model
+        print(f"\nUsing model from --gaze-model: {_MODEL_DISPLAY_NAMES.get(chosen_name, chosen_name)}", flush=True)
+    else:
+        if results[0][1] == float("inf"):
+            raise RuntimeError(
+                "All gaze model candidates failed during LOO-CV. "
+                "Try more calibration samples or check the camera feed.",
+            )
+        chosen_name = results[0][0]
+        print(
+            f"\nAuto-selected best model: {_MODEL_DISPLAY_NAMES.get(chosen_name, chosen_name)} "
+            f"(override with e.g. --gaze-model ridge)",
+            flush=True,
+        )
+
+    print(f"Fitting {_MODEL_DISPLAY_NAMES.get(chosen_name, chosen_name)} on all data …", flush=True)
+    return fit_gaze_model(
+        feature_rows, screen_xy, gaze_width, gaze_height,
+        ridge_lambda=ridge_lambda, model=chosen_name,
+    )
 
 
 def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
@@ -292,9 +367,6 @@ def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
     else:
         print(f"Could not detect screen; using {gw} x {gh}", flush=True)
 
-    print(f"Opening camera {cfg.camera_index} for calibration...", flush=True)
-    import os
-
     if os.name == "nt":
         cap = cv2.VideoCapture(cfg.camera_index, cv2.CAP_DSHOW)
     else:
@@ -306,19 +378,25 @@ def calibrate_cli(args: argparse.Namespace, proc_fn, cfg: MonitorConfig) -> int:
 
     detector = FaceMeshEyeDetector(cfg, model_path=args.model)
     try:
-        cal = run_calibration(
-            cap=cap,
-            detector=detector,
-            proc_fn=proc_fn,
-            gaze_width=gw,
-            gaze_height=gh,
-            out_path=Path(args.gaze_file),
-            samples_per_point=args.gaze_samples,
-            ear_min=args.gaze_ear_min,
-            ridge_lambda=args.gaze_ridge,
-            blink_close=args.blink_close,
-            blink_open=args.blink_open,
-        )
+        try:
+            cal = run_calibration(
+                cap=cap,
+                detector=detector,
+                proc_fn=proc_fn,
+                gaze_width=gw,
+                gaze_height=gh,
+                out_path=Path(args.gaze_file),
+                samples_per_point=args.gaze_samples,
+                ear_min=args.gaze_ear_min,
+                ridge_lambda=args.gaze_ridge,
+                gaze_model=getattr(args, "gaze_model", "auto"),
+                use_fixed_grid=not getattr(args, "gaze_cal_random", False),
+                n_calibration_points=max(3, int(getattr(args, "gaze_cal_points", 36))),
+                calibration_seed=getattr(args, "gaze_cal_seed", None),
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         if cal is None:
             print("Calibration aborted.", file=sys.stderr)
             return 1

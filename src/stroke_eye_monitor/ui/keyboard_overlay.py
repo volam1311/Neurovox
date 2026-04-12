@@ -149,7 +149,36 @@ class GazeKeyboard:
         idx = min(n - 1, len(self.suggestions) - 1)
         self._apply_pick(idx)
 
-    def layout(self, canvas_w: int, canvas_h: int) -> None:
+    @property
+    def stage(self) -> int:
+        """Reserved for multi-stage keyboards; LLM keyboard is single-stage."""
+        return 0
+
+    def go_back(self) -> None:
+        """No-op (single-stage QWERTY)."""
+        return None
+
+    def layout_bounds(self) -> tuple[int, int, int, int] | None:
+        """Axis-aligned bounds of all keys in layout pixels (same space as ``hit_test``)."""
+        if not self.cells:
+            return None
+        return (
+            min(c.x0 for c in self.cells),
+            max(c.x1 for c in self.cells),
+            min(c.y0 for c in self.cells),
+            max(c.y1 for c in self.cells),
+        )
+
+    def layout(
+        self,
+        canvas_w: int,
+        canvas_h: int,
+        *,
+        gaze_model: str | None = None,
+        margin_top_frac: float | None = None,
+        margin_bot_frac: float | None = None,
+    ) -> None:
+        del gaze_model  # optional hint for future profile tuning
         self._canvas_w = canvas_w
         self._canvas_h = canvas_h
         self._base_image = None

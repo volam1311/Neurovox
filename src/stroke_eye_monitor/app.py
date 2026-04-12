@@ -33,11 +33,11 @@ from LLM.openai_backend import OpenAICompletion
 def _load_gaze_calibration_from_path(path: Path) -> tuple[GazeCalibration | None, int]:
     """Load gaze JSON from ``path``. Return ``(calibration, exit_code)``; exit 1 on invalid file."""
     gaze_cal = GazeCalibration.load(path)
-    if gaze_cal.feature_dim != 8:
+    if gaze_cal.feature_dim != 17:
         print(
             "This gaze_calibration.json doesn't match the current gaze model. "
-            "Run calibration again to regenerate (expects 8 features: iris offsets, "
-            "head rotation Rodrigues vector, bias).",
+            "Run --calibrate again to regenerate (expects 17 features: iris offsets, "
+            "head rotations + sin/cos expansions, head translation, bias).",
             file=sys.stderr,
         )
         return None, 1
@@ -60,6 +60,8 @@ def _build_live_pipeline(
             blink_close=args.blink_close,
             blink_open=args.blink_open,
             spoken_buffer=spoken_buffer,
+            margin_top_frac=getattr(args, "kbd_top", None),
+            margin_bot_frac=getattr(args, "kbd_bottom", None),
         )
 
     return LiveEyePipeline(
@@ -71,6 +73,8 @@ def _build_live_pipeline(
         keyboard=kbd,
         llm_backend=llm_backend,
         spoken_buffer=spoken_buffer,
+        keyboard_gaze_median_n=getattr(args, "gaze_keyboard_median", 1),
+        keyboard_gaze_gain=getattr(args, "gaze_keyboard_gain", 1.0),
     )
 
 
@@ -108,7 +112,12 @@ def run(argv: list[str] | None = None) -> int:
     if args.calibrate:
         from stroke_eye_monitor.modes.gaze_calibration import calibrate_cli
 
-        return calibrate_cli(args, proc_fn, cfg)
+        rc = calibrate_cli(args, proc_fn, cfg)
+        if rc != 0:
+            return rc
+        print("Calibration complete — launching keyboard …", flush=True)
+        args.gaze = True
+        args.keyboard = True
 
     if args.collect:
         from stroke_eye_monitor.modes.data_collection import collect_cli
@@ -161,8 +170,8 @@ def run(argv: list[str] | None = None) -> int:
             else (args.gaze_width, args.gaze_height)
         )
         print(
-            "No gaze calibration file found; starting interactive calibration (12 gaze points "
-            "+ blink timing), then continuing to the main view.",
+            "No gaze calibration file found; starting interactive calibration (fixed grid or "
+            "random dots + ML gaze model), then continuing to the main view.",
             flush=True,
         )
         cal = run_calibration(
@@ -175,8 +184,10 @@ def run(argv: list[str] | None = None) -> int:
             samples_per_point=args.gaze_samples,
             ear_min=args.gaze_ear_min,
             ridge_lambda=args.gaze_ridge,
-            blink_close=args.blink_close,
-            blink_open=args.blink_open,
+            gaze_model=args.gaze_model,
+            use_fixed_grid=not args.gaze_cal_random,
+            n_calibration_points=max(3, args.gaze_cal_points),
+            calibration_seed=args.gaze_cal_seed,
         )
         if cal is None:
             print("Calibration aborted.", file=sys.stderr)
@@ -281,7 +292,8 @@ def run(argv: list[str] | None = None) -> int:
                 if key in (27, ord("q")):
                     break
                 if key == ord("d"):
-                    pipeline.backspace_typed()
+                    if not pipeline.keyboard_go_back():
+                        pipeline.backspace_typed()
                 continue
 
             fps = fps_meter.tick()
@@ -343,13 +355,15 @@ def run(argv: list[str] | None = None) -> int:
             # Overlay keyboard directly onto the webcam feed (after mirror flip!)
             if pipeline.keyboard_session is not None:
                 pipeline.draw_keyboard(display)
+                pipeline.draw_gaze_pointer_on_keyboard(display)
 
             cv2.imshow(cfg.window_name, display)
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
             if key == ord("d"):
-                pipeline.backspace_typed()
+                if not pipeline.keyboard_go_back():
+                    pipeline.backspace_typed()
     finally:
         if voice_listener is not None:
             voice_listener.stop()
