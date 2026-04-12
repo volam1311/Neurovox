@@ -47,6 +47,8 @@ class KeyboardSession:
         margin_top_frac: float | None = None,
         margin_bot_frac: float | None = None,
         infer_confirm_hold_s: float = 3.0,
+        wink_mic_hold_s: float = 1.0,
+        gravity_snap: bool = True,
     ) -> KeyboardSession:
         win = "Main Output"  # We'll just draw onto the main app window
 
@@ -57,6 +59,7 @@ class KeyboardSession:
             dwell_seconds=gaze_cal.dwell_ms / 1000.0,
             on_sentence_chosen=on_sentence_chosen,
             spoken_buffer=spoken_buffer,
+            gravity_snap=gravity_snap,
         )
         keyboard.layout(
             kb_w,
@@ -66,12 +69,14 @@ class KeyboardSession:
             margin_bot_frac=margin_bot_frac,
         )
         keyboard.infer_confirm_hold_s = max(0.5, float(infer_confirm_hold_s))
+        keyboard.wink_mic_hold_s = max(0.25, float(wink_mic_hold_s))
         blink = BlinkDetector(
             close_threshold=blink_close,
             open_threshold=blink_open,
             min_closed_frames=1,
             cooldown_frames=4,
         )
+        keyboard.attach_blink(blink)
 
         return KeyboardSession(
             window_name=win,
@@ -100,6 +105,7 @@ class LiveEyePipeline:
         keyboard_gaze_median_n: int = 1,
         keyboard_gaze_gain: float = 1.0,
         blink_close_threshold: float = 0.12,
+        blink_open_threshold: float = 0.16,
     ) -> None:
         self._gaze_file_label = gaze_file_label
         self._gaze_cal = gaze_cal
@@ -114,6 +120,7 @@ class LiveEyePipeline:
         self._kbd_median_n = max(0, int(keyboard_gaze_median_n))
         self._kbd_gain = max(0.01, float(keyboard_gaze_gain))
         self._blink_close_thresh = float(blink_close_threshold)
+        self._blink_open_thresh = float(blink_open_threshold)
         self._last_step_monotonic: float | None = None
         if keyboard is not None and self._kbd_median_n >= 3:
             self._kbd_sm_buf: deque[tuple[float, float]] = deque(maxlen=self._kbd_median_n)
@@ -176,6 +183,8 @@ class LiveEyePipeline:
             )
             with self._llm_lock:
                 kb.keyboard.set_suggestions(suggestions)
+            # Avoid counting a reopen edge from the inference moment as suggestion blink 1.
+            kb.blink.reset()
         except Exception as exc:
             print(f"LLM error: {exc}", flush=True)
         finally:
@@ -192,6 +201,7 @@ class LiveEyePipeline:
         if result.landmarks is None:
             if self._kbd is not None:
                 self._kbd.keyboard.reset_infer_confirm_accum()
+                self._kbd.keyboard.reset_mic_wink_accums()
             return hud
 
         now = time.monotonic()
@@ -267,7 +277,9 @@ class LiveEyePipeline:
                             kbd_gx = float(np.clip(kbd_gx, 0.0, gw - 1.0))
                             kbd_gy = float(np.clip(kbd_gy, 0.0, gh - 1.0))
                         self._kbd.keyboard.update_gaze(kbd_gx, kbd_gy)
-                        self._pointer_gx, self._pointer_gy = kbd_gx, kbd_gy
+                        self._pointer_gx, self._pointer_gy = (
+                            self._kbd.keyboard.pointer_gaze_for_display()
+                        )
                     else:
                         self._pointer_gx, self._pointer_gy = self._sm_gx, self._sm_gy
 
@@ -293,7 +305,7 @@ class LiveEyePipeline:
             kb = self._kbd.keyboard
             avg_ear = (m.left_ear + m.right_ear) / 2.0
 
-            if not kb.block_input:
+            if (not kb.block_input) or kb.reset_hover:
                 if self._kbd.blink.feed(avg_ear):
                     letter = kb.select()
                     if letter is not None:
@@ -304,6 +316,18 @@ class LiveEyePipeline:
             elif kb.input_enabled and not kb.suggestions:
                 kb.feed_infer_confirm_closure(
                     dt, avg_ear, self._blink_close_thresh, kb.infer_confirm_hold_s
+                )
+
+            if kb.block_input:
+                kb.reset_mic_wink_accums()
+            else:
+                kb.feed_mic_wink_gate(
+                    dt,
+                    float(self._sm_l_ear),
+                    float(self._sm_r_ear),
+                    self._blink_close_thresh,
+                    self._blink_open_thresh,
+                    kb.wink_mic_hold_s,
                 )
 
             if not kb.block_input:
