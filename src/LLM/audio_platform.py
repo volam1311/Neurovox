@@ -10,6 +10,7 @@ Environment (optional):
   NEUROVOX_AUDIO_PLAY_BACKEND   auto | sounddevice | system
   NEUROVOX_AUDIO_RECORD_BACKEND auto | sounddevice | soundcard
   NEUROVOX_TTS_PAD_MS           leading/trailing silence padding (helps DAC / Bluetooth)
+  NEUROVOX_NO_INFER_CHIME       set to 1 to skip the eyes-closed-send confirmation chime
 """
 
 from __future__ import annotations
@@ -130,6 +131,50 @@ def _pcm_mono_float32_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes
         wf.setframerate(int(sample_rate))
         wf.writeframes(pcm16.tobytes())
     return buf.getvalue()
+
+
+def play_infer_confirm_chime_async() -> None:
+    """Fire-and-forget chime when the eyes-closed (send) hold completes.
+
+    Does not block the gaze/CV loop. Uses the same playback path as TTS (``play_wav_bytes``).
+    Disable with ``NEUROVOX_NO_INFER_CHIME=1``.
+    """
+    if (os.environ.get("NEUROVOX_NO_INFER_CHIME") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+
+    def _run() -> None:
+        try:
+            sr = 44100
+            # Short two-tone "success" (E5 then C5), ~0.28 s total
+            dur1 = 0.11
+            dur2 = 0.13
+            gap = 0.02
+            n1 = max(1, int(sr * dur1))
+            n2 = max(1, int(sr * dur2))
+            ng = max(1, int(sr * gap))
+            t1 = np.linspace(0.0, dur1, n1, endpoint=False, dtype=np.float64)
+            t2 = np.linspace(0.0, dur2, n2, endpoint=False, dtype=np.float64)
+            f1, f2 = 659.25, 523.25
+            p1 = np.sin(2 * np.pi * f1 * t1) * np.minimum(1.0, t1 / 0.018) * np.exp(-5.5 * t1)
+            p2 = np.sin(2 * np.pi * f2 * t2) * np.minimum(1.0, t2 / 0.018) * np.exp(-4.5 * t2)
+            audio = np.concatenate(
+                [
+                    (p1 * 0.34).astype(np.float32),
+                    np.zeros(ng, dtype=np.float32),
+                    (p2 * 0.30).astype(np.float32),
+                ]
+            )
+            with _play_lock:
+                if not _play_float_sounddevice(audio, sr):
+                    _play_wav_system(_pcm_mono_float32_to_wav_bytes(audio, sr))
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _play_float_sounddevice(audio: np.ndarray, sr: int) -> bool:
