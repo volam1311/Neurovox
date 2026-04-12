@@ -100,6 +100,8 @@ class SttListener:
         self._thread: threading.Thread | None = None
         self._paused = False
         self._pause_lock = threading.Lock()
+        self._mic_armed = False
+        self._arm_lock = threading.Lock()
 
     def pause(self) -> None:
         """Skip recording/transcription while assistant audio is playing (avoid echo)."""
@@ -122,6 +124,15 @@ class SttListener:
     def _is_paused(self) -> bool:
         with self._pause_lock:
             return self._paused
+
+    def set_mic_armed(self, armed: bool) -> None:
+        """When False, the mic thread never records (wink-gated STT)."""
+        with self._arm_lock:
+            self._mic_armed = bool(armed)
+
+    def _is_mic_armed(self) -> bool:
+        with self._arm_lock:
+            return self._mic_armed
 
     def start(self) -> None:
         if self._running:
@@ -146,6 +157,9 @@ class SttListener:
         while self._running:
             try:
                 if self._is_paused():
+                    time.sleep(0.05)
+                    continue
+                if not self._is_mic_armed():
                     time.sleep(0.05)
                     continue
                 n = int(self._chunk_seconds * self._sr)
