@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+import time
 
 import cv2
 import numpy as np
@@ -45,6 +46,7 @@ class KeyboardSession:
         spoken_buffer: SpokenContextBuffer | None = None,
         margin_top_frac: float | None = None,
         margin_bot_frac: float | None = None,
+        infer_confirm_hold_s: float = 3.0,
     ) -> KeyboardSession:
         win = "Main Output"  # We'll just draw onto the main app window
 
@@ -63,6 +65,7 @@ class KeyboardSession:
             margin_top_frac=margin_top_frac,
             margin_bot_frac=margin_bot_frac,
         )
+        keyboard.infer_confirm_hold_s = max(0.5, float(infer_confirm_hold_s))
         blink = BlinkDetector(
             close_threshold=blink_close,
             open_threshold=blink_open,
@@ -96,6 +99,7 @@ class LiveEyePipeline:
         spoken_buffer: SpokenContextBuffer | None = None,
         keyboard_gaze_median_n: int = 1,
         keyboard_gaze_gain: float = 1.0,
+        blink_close_threshold: float = 0.12,
     ) -> None:
         self._gaze_file_label = gaze_file_label
         self._gaze_cal = gaze_cal
@@ -109,6 +113,8 @@ class LiveEyePipeline:
         self._llm_lock = threading.Lock()
         self._kbd_median_n = max(0, int(keyboard_gaze_median_n))
         self._kbd_gain = max(0.01, float(keyboard_gaze_gain))
+        self._blink_close_thresh = float(blink_close_threshold)
+        self._last_step_monotonic: float | None = None
         if keyboard is not None and self._kbd_median_n >= 3:
             self._kbd_sm_buf: deque[tuple[float, float]] = deque(maxlen=self._kbd_median_n)
         else:
@@ -184,7 +190,15 @@ class LiveEyePipeline:
             hud.append(f"Gaze file: {self._gaze_file_label}")
 
         if result.landmarks is None:
+            if self._kbd is not None:
+                self._kbd.keyboard.reset_infer_confirm_accum()
             return hud
+
+        now = time.monotonic()
+        if self._last_step_monotonic is None:
+            self._last_step_monotonic = now
+        dt = max(0.0, min(0.25, now - self._last_step_monotonic))
+        self._last_step_monotonic = now
 
         h, w = result.image_shape
         m = compute_eye_metrics(result.landmarks, h, w)
@@ -277,14 +291,22 @@ class LiveEyePipeline:
 
         if self._kbd is not None:
             kb = self._kbd.keyboard
+            avg_ear = (m.left_ear + m.right_ear) / 2.0
 
             if not kb.block_input:
-                avg_ear = (m.left_ear + m.right_ear) / 2.0
                 if self._kbd.blink.feed(avg_ear):
                     letter = kb.select()
                     if letter is not None:
                         hud.append(f"SELECTED: {letter}")
 
+            if kb.block_input:
+                kb.reset_infer_confirm_accum()
+            elif kb.input_enabled and not kb.suggestions:
+                kb.feed_infer_confirm_closure(
+                    dt, avg_ear, self._blink_close_thresh, kb.infer_confirm_hold_s
+                )
+
+            if not kb.block_input:
                 if self.llm_backend is not None and kb.last_action == "PREDICT":
                     if kb.history:
                         kb.last_action = None

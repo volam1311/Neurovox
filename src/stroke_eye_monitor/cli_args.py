@@ -7,10 +7,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Live eye & iris tracking via MediaPipe Face Landmarker. "
-            "Optional calibrated on-screen gaze (see --calibrate / --gaze)."
+            "Default: full gaze keyboard + LLM — calibrates if gaze_calibration.json "
+            "is missing, otherwise loads it and runs."
         )
     )
-    p.add_argument("--camera", type=int, default=0, help="OpenCV camera index")
+    p.add_argument("--camera", type=int, default=2, help="OpenCV camera index")
     p.add_argument(
         "--width",
         type=int,
@@ -34,7 +35,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--calibration",
         action="store_true",
         dest="calibrate",
-        help="Run gaze calibration (saves --gaze-file), then exit (--calibration is the same)",
+        help=(
+            "Run gaze calibration (writes --gaze-file), then continue into the app. "
+            "Use this to replace an existing calibration. If you omit this and no file "
+            "exists, calibration runs automatically once."
+        ),
     )
     p.add_argument(
         "--gaze",
@@ -141,9 +146,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Mean EAR above this = open again after a blink (lower = easier reopen; must be > --blink-close)",
     )
     p.add_argument(
+        "--infer-confirm-seconds",
+        type=float,
+        default=3.0,
+        metavar="SEC",
+        help=(
+            "After typing is unlocked: hold eyes closed (EAR below --blink-close) for this long "
+            "to confirm and send the line to inference (default: 3). No gaze position required."
+        ),
+    )
+    p.add_argument(
         "--keyboard",
-        action="store_true",
-        help="Show gaze keyboard overlay (implies --gaze); blink to select letters",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Full app: gaze keyboard + inference (default: on). "
+            "Use --no-keyboard for camera preview without the keyboard overlay."
+        ),
     )
     p.add_argument(
         "--kbd-top",

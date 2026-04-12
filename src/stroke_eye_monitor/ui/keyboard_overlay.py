@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -8,8 +9,65 @@ from typing import Any
 import cv2
 import numpy as np
 
-# Standard QWERTY layout; last key is backspace.
-QWERTY_ROWS = [list("QWERTYUIOP"), list("ASDFGHJKL"), list("ZXCVBNM") + ["BKSP"]]
+# From origin/main: gaze-model-aware geometry + robust hit testing (eye_dimension stack).
+_HIT_PAD_FRAC = 0.14
+_KEY_MAX_WIDTH_OVER_HEIGHT = 1.32
+_KEY_GAP_FRAC = 0.06
+
+# Standard QWERTY; last key is backspace (AAC / inference flow).
+QWERTY_ROWS = [
+    list("QWERTYUIOP"),
+    list("ASDFGHJKL"),
+    list("ZXCVBNM") + ["BKSP"],
+]
+ROWS = len(QWERTY_ROWS)
+
+
+@dataclass(frozen=True)
+class KeyboardLayoutProfile:
+    """Geometry and timing tuned to how different gaze regressors behave live."""
+
+    margin_x_frac: float
+    margin_top_frac: float
+    margin_bot_frac: float
+    dwell_seconds: float
+    overlay_key_alpha: float
+    active_outline_bgr: tuple[int, int, int]
+    dwell_fill_bgr: tuple[int, int, int]
+
+
+def keyboard_profile_for_gaze_model(model_type: str | None) -> KeyboardLayoutProfile:
+    """Linear maps are often stable in a tight band; tree/boost models benefit from larger targets."""
+    mt = (model_type or "").strip().lower()
+    if mt in ("ridge", "poly"):
+        return KeyboardLayoutProfile(
+            margin_x_frac=0.10,
+            margin_top_frac=0.06,
+            margin_bot_frac=0.20,
+            dwell_seconds=0.62,
+            overlay_key_alpha=0.62,
+            active_outline_bgr=(0, 220, 255),
+            dwell_fill_bgr=(76, 175, 80),
+        )
+    if mt in ("rf", "xgboost", "gbr"):
+        return KeyboardLayoutProfile(
+            margin_x_frac=0.06,
+            margin_top_frac=0.06,
+            margin_bot_frac=0.20,
+            dwell_seconds=0.88,
+            overlay_key_alpha=0.55,
+            active_outline_bgr=(80, 160, 255),
+            dwell_fill_bgr=(70, 170, 100),
+        )
+    return KeyboardLayoutProfile(
+        margin_x_frac=0.08,
+        margin_top_frac=0.06,
+        margin_bot_frac=0.20,
+        dwell_seconds=0.75,
+        overlay_key_alpha=0.58,
+        active_outline_bgr=(50, 200, 255),
+        dwell_fill_bgr=(76, 175, 80),
+    )
 
 # Session transcript for LLM context (sliding window is applied server-side)
 _MAX_HISTORY_TURNS = 32
@@ -64,7 +122,7 @@ class KeyboardCell:
 
 @dataclass
 class GazeKeyboard:
-    """QWERTY with dwell-typing; triple-blink unlock / predict like the original demo."""
+    """QWERTY: 3 blinks unlock typing; blink on key types; eyes closed ~3s confirms to inference."""
 
     cells: list[KeyboardCell] = field(default_factory=list)
     typed: list[str] = field(default_factory=list)
@@ -74,8 +132,8 @@ class GazeKeyboard:
     _canvas_h: int = 0
     _base_image: np.ndarray | None = field(default=None, repr=False, init=False)
 
-    _cell_enter_time: float = 0.0
-    _dwell_triggered: bool = False
+    _last_gx: float | None = field(default=None, repr=False)
+    _last_gy: float | None = field(default=None, repr=False)
 
     _blink_timestamps: list[float] = field(default_factory=list)
     history: list[str] = field(default_factory=list)
@@ -86,6 +144,11 @@ class GazeKeyboard:
     last_action: str | None = None
 
     dwell_seconds: float = 0.8
+    # After unlock: cumulative seconds eyes closed to confirm line -> inference (no gaze rule).
+    infer_confirm_hold_s: float = 3.0
+    _infer_confirm_accum_s: float = field(default=0.0, repr=False)
+    # Shown while TTS reads a chosen phrase (main thread draws; worker sets text).
+    tts_spoken_text: str | None = None
 
     # After LLM: blink 1x / 2x / 3x to pick option; 4x = dismiss
     _suggest_blink_ts: list[float] = field(default_factory=list)
@@ -93,16 +156,49 @@ class GazeKeyboard:
     on_sentence_chosen: Callable[[str], None] | None = None
     spoken_buffer: Any = None
 
+    _profile: KeyboardLayoutProfile = field(
+        default_factory=lambda: keyboard_profile_for_gaze_model(None),
+        repr=False,
+    )
+    _gaze_model_label: str = field(default="", repr=False)
+
+    def reset_infer_confirm_accum(self) -> None:
+        self._infer_confirm_accum_s = 0.0
+
+    def feed_infer_confirm_closure(
+        self,
+        dt: float,
+        avg_ear: float,
+        close_thresh: float,
+        hold_s: float,
+    ) -> None:
+        """Accumulate continuous eyes-closed time, then run inference (no gaze-to-chat rule)."""
+        if not self.input_enabled or self.block_input or self.suggestions:
+            self._infer_confirm_accum_s = 0.0
+            return
+        hold = max(0.5, float(hold_s))
+        if avg_ear <= close_thresh:
+            self._infer_confirm_accum_s += float(dt)
+            if self._infer_confirm_accum_s >= hold:
+                self._infer_confirm_accum_s = 0.0
+                self._trigger_predict()
+        else:
+            self._infer_confirm_accum_s = 0.0
+
+    @property
+    def infer_confirm_accum_s(self) -> float:
+        return float(self._infer_confirm_accum_s)
+
     def set_suggestions(self, suggestions: list[Any]) -> None:
         self.suggestions = list(suggestions)[:3]
         self._suggest_blink_ts.clear()
         self._blink_timestamps.clear()
+        self._infer_confirm_accum_s = 0.0
 
     def _dismiss_suggestions(self) -> None:
         self.suggestions = []
         self._suggest_blink_ts.clear()
         self._active_cell = -1
-        self._dwell_triggered = False
 
     def _apply_pick(self, index: int) -> None:
         if not self.suggestions or index < 0 or index >= len(self.suggestions):
@@ -125,7 +221,6 @@ class GazeKeyboard:
         self.suggestions = []
         self._suggest_blink_ts.clear()
         self._active_cell = -1
-        self._dwell_triggered = False
 
     def _tick_suggestion_blink_resolve(self) -> None:
         if not self.suggestions or self.block_input:
@@ -178,67 +273,144 @@ class GazeKeyboard:
         margin_top_frac: float | None = None,
         margin_bot_frac: float | None = None,
     ) -> None:
-        del gaze_model  # optional hint for future profile tuning
         self._canvas_w = canvas_w
         self._canvas_h = canvas_h
         self._base_image = None
+        self._profile = keyboard_profile_for_gaze_model(gaze_model)
+        raw = (gaze_model or "").strip()
+        self._gaze_model_label = raw.upper()[:14] if raw else "DEFAULT"
 
-        self._hint_h = max(44, int(canvas_h * 0.042))
-        self._suggest_h = max(150, int(canvas_h * 0.17))
-        self._status_h = max(28, int(canvas_h * 0.028))
-        self._bottom_h = max(30, int(canvas_h * 0.03))
-        kbd_h = int(canvas_h * 0.44)
+        # Large keyboard band for gaze tolerance; single chat column uses the rest.
+        self._bottom_h = max(26, int(canvas_h * 0.024))
+        kbd_h = int(canvas_h * 0.60)
         self._kbd_top = canvas_h - kbd_h - self._bottom_h
         self._kbd_bottom = canvas_h - self._bottom_h
-        self._text_top = self._hint_h + self._suggest_h + self._status_h
+        self._chat_title_h = max(36, int(canvas_h * 0.034))
+        self._text_top = self._chat_title_h + int(canvas_h * 0.012)
         self._text_bottom = self._kbd_top
 
-        rows = QWERTY_ROWS
-        nrows = len(rows)
-        row_h = kbd_h / nrows
-        self.cells = []
-        max_keys = max(len(r) for r in rows)
-        margin_x = canvas_w * 0.05
-        key_w = (canvas_w - 2 * margin_x) / max_keys
+        p = self._profile
+        top_y = int(self._kbd_top)
+        bot_y = int(self._kbd_bottom)
+        cw = int(canvas_w)
+        margin_x = int(round(cw * p.margin_x_frac))
+        usable_w = cw - 2 * margin_x
+        usable_h = max(1, bot_y - top_y)
+        row_h = usable_h / ROWS
 
-        for r, row_keys in enumerate(rows):
-            y0 = int(round(self._kbd_top + r * row_h))
-            y1 = int(round(self._kbd_top + (r + 1) * row_h))
-            if len(row_keys) == 1:
-                x0 = int(round(margin_x))
-                x1 = int(round(canvas_w - margin_x))
+        max_keys = max(len(r) for r in QWERTY_ROWS)
+        key_w_full = usable_w / float(max_keys)
+        key_w_cap = float(row_h) * _KEY_MAX_WIDTH_OVER_HEIGHT
+        key_w = min(key_w_full, key_w_cap)
+        gap = max(0.0, key_w * _KEY_GAP_FRAC)
+
+        self.cells = []
+        for r, row_keys in enumerate(QWERTY_ROWS):
+            y0 = int(round(top_y + r * row_h))
+            y1 = int(round(top_y + (r + 1) * row_h))
+            n = len(row_keys)
+            row_inner_w = n * key_w + max(0, n - 1) * gap
+            start_x = margin_x + max(0.0, (usable_w - row_inner_w) * 0.5)
+            for c, letter in enumerate(row_keys):
+                x0f = start_x + c * (key_w + gap)
+                x1f = x0f + key_w
+                x0 = int(round(x0f))
+                x1 = int(round(x1f))
+                if x1 <= x0:
+                    x1 = x0 + 1
                 self.cells.append(
                     KeyboardCell(
-                        row=r, col=0, letter=row_keys[0], x0=x0, y0=y0, x1=x1, y1=y1
+                        row=r, col=c, letter=letter, x0=x0, y0=y0, x1=x1, y1=y1
                     )
                 )
+
+    @staticmethod
+    def _cell_center(c: KeyboardCell) -> tuple[float, float]:
+        return ((c.x0 + c.x1) * 0.5, (c.y0 + c.y1) * 0.5)
+
+    @staticmethod
+    def _padded_hit_rect(c: KeyboardCell) -> tuple[float, float, float, float]:
+        w = max(1.0, float(c.x1 - c.x0))
+        h = max(1.0, float(c.y1 - c.y0))
+        pad = _HIT_PAD_FRAC * min(w, h)
+        return (float(c.x0 - pad), float(c.x1 + pad), float(c.y0 - pad), float(c.y1 + pad))
+
+    def _nearest_key_row_first(self, gx: float, gy: float) -> int:
+        if not self.cells:
+            return -1
+        by_row: dict[int, list[tuple[int, KeyboardCell]]] = defaultdict(list)
+        for i, c in enumerate(self.cells):
+            by_row[c.row].append((i, c))
+
+        row_metrics: list[tuple[float, float, int]] = []
+        for r, lst in by_row.items():
+            y0 = min(c.y0 for _, c in lst)
+            y1 = max(c.y1 for _, c in lst)
+            yc = 0.5 * (y0 + y1)
+            if y0 <= gy <= y1:
+                dy = 0.0
             else:
-                row_px_width = len(row_keys) * key_w
-                start_x = (canvas_w - row_px_width) / 2
-                for c, letter in enumerate(row_keys):
-                    x0 = int(round(start_x + c * key_w))
-                    x1 = int(round(start_x + (c + 1) * key_w))
-                    self.cells.append(
-                        KeyboardCell(
-                            row=r, col=c, letter=letter, x0=x0, y0=y0, x1=x1, y1=y1
-                        )
-                    )
+                dy = min(abs(gy - y0), abs(gy - y1))
+            row_metrics.append((dy, abs(gy - yc), r))
+        row_metrics.sort(key=lambda t: (t[0], t[1]))
+        best_row = row_metrics[0][2]
+
+        lst = by_row[best_row]
+        best_i = lst[0][0]
+        best_dx = float("inf")
+        for i, c in lst:
+            cx, _ = self._cell_center(c)
+            dx = abs(gx - cx)
+            if dx < best_dx:
+                best_dx = dx
+                best_i = i
+        return best_i
 
     def hit_test(self, gx: float, gy: float) -> int:
         if not self.cells:
             return -1
-        best_index = -1
-        min_dist = float("inf")
+        loose: list[int] = []
         for i, c in enumerate(self.cells):
-            cx = (c.x0 + c.x1) / 2.0
-            cy = (c.y0 + c.y1) / 2.0
-            dist_sq = (gx - cx) ** 2 + (gy - cy) ** 2
-            if dist_sq < min_dist:
-                min_dist = dist_sq
-                best_index = i
-        return best_index
+            x0, x1, y0, y1 = self._padded_hit_rect(c)
+            if x0 <= gx <= x1 and y0 <= gy <= y1:
+                loose.append(i)
+        if len(loose) == 1:
+            return loose[0]
+        if len(loose) > 1:
+            best_i = loose[0]
+            cx, cy = self._cell_center(self.cells[best_i])
+            best_d = (gx - cx) ** 2 + (gy - cy) ** 2
+            for j in loose[1:]:
+                cx, cy = self._cell_center(self.cells[j])
+                d = (gx - cx) ** 2 + (gy - cy) ** 2
+                if d < best_d:
+                    best_d = d
+                    best_i = j
+            return best_i
+
+        strict: list[int] = []
+        for i, c in enumerate(self.cells):
+            if c.x0 <= gx <= c.x1 and c.y0 <= gy <= c.y1:
+                strict.append(i)
+        if len(strict) == 1:
+            return strict[0]
+        if len(strict) > 1:
+            best_i = strict[0]
+            cx, cy = self._cell_center(self.cells[best_i])
+            best_d = (gx - cx) ** 2 + (gy - cy) ** 2
+            for j in strict[1:]:
+                cx, cy = self._cell_center(self.cells[j])
+                d = (gx - cx) ** 2 + (gy - cy) ** 2
+                if d < best_d:
+                    best_d = d
+                    best_i = j
+            return best_i
+
+        return self._nearest_key_row_first(gx, gy)
 
     def update_gaze(self, gx: float, gy: float) -> None:
+        self._last_gx = float(gx)
+        self._last_gy = float(gy)
         if self.suggestions and not self.block_input:
             self._tick_suggestion_blink_resolve()
             self._active_cell = -1
@@ -246,27 +418,12 @@ class GazeKeyboard:
 
         if not self.input_enabled:
             self._active_cell = -1
-            self._dwell_triggered = False
             return
 
-        new_cell = self.hit_test(gx, gy)
-        if new_cell != self._active_cell:
-            self._active_cell = new_cell
-            self._cell_enter_time = time.time()
-            self._dwell_triggered = False
-        else:
-            if self._active_cell >= 0 and not self._dwell_triggered:
-                cell = self.cells[self._active_cell]
-                if time.time() - self._cell_enter_time >= self.dwell_seconds:
-                    self._dwell_triggered = True
-                    if cell.letter == "BKSP":
-                        if self.typed:
-                            self.typed.pop()
-                    else:
-                        self.typed.append(cell.letter)
+        self._active_cell = self.hit_test(gx, gy)
 
     def select(self) -> str | None:
-        """Blink: suggestion mode = count blinks; else triple-blink = unlock (idle) or PREDICT."""
+        """Suggestions: blink count. Else: 3 blinks unlock; blink on key types; infer uses eye closure."""
         if self.suggestions and not self.block_input:
             now = time.time()
             self._suggest_blink_ts.append(now)
@@ -278,21 +435,39 @@ class GazeKeyboard:
             return None
 
         now = time.time()
-        self._blink_timestamps.append(now)
-        self._blink_timestamps = [
-            t for t in self._blink_timestamps if now - t <= _BLINK_WINDOW_S
-        ]
-        if len(self._blink_timestamps) < 3:
-            return None
-        self._blink_timestamps.clear()
 
         if not self.input_enabled:
+            self._blink_timestamps.append(now)
+            self._blink_timestamps = [
+                t for t in self._blink_timestamps if now - t <= _BLINK_WINDOW_S
+            ]
+            if len(self._blink_timestamps) < 3:
+                return None
+            self._blink_timestamps.clear()
+            self._infer_confirm_accum_s = 0.0
             self.input_enabled = True
             print(">>> Typing unlocked (3 blinks) <<<", flush=True)
             return None
 
-        self._trigger_predict()
-        return "PREDICT"
+        ly = self._last_gy
+        if ly is None:
+            ly = self._kbd_top + 1.0
+
+        # Conversation panel: blinks do not type (inference is eyes-closed hold, not gaze).
+        if ly < float(self._kbd_top):
+            return None
+
+        # Keyboard: one blink commits the highlighted key.
+        self._infer_confirm_accum_s = 0.0
+        if 0 <= self._active_cell < len(self.cells):
+            cell = self.cells[self._active_cell]
+            if cell.letter == "BKSP":
+                if self.typed:
+                    self.typed.pop()
+                return "BKSP"
+            self.typed.append(cell.letter)
+            return cell.letter
+        return None
 
     def _trigger_predict(self) -> None:
         sentence = "".join(self.typed).strip()
@@ -329,13 +504,7 @@ class GazeKeyboard:
         sx = w / self._canvas_w
         sy = h / self._canvas_h
 
-        hint_h = self._scaled(self._hint_h, sy)
-        suggest_h = self._scaled(self._suggest_h, sy)
-        status_h = self._scaled(self._status_h, sy)
         bottom_h = self._scaled(self._bottom_h, sy)
-        kbd_top = self._scaled(self._kbd_top, sy)
-        text_top = self._scaled(self._text_top, sy)
-        text_bot = kbd_top
 
         if self._base_image is None or self._base_image.shape[:2] != (h, w):
             self._base_image = np.zeros((h, w, 3), dtype=np.uint8)
@@ -373,8 +542,9 @@ class GazeKeyboard:
             cell = self.cells[self._active_cell]
             dx0, dy0 = int(round(cell.x0 * sx)), int(round(cell.y0 * sy))
             dx1, dy1 = int(round(cell.x1 * sx)), int(round(cell.y1 * sy))
+            ol_b, ol_g, ol_r = self._profile.active_outline_bgr
             cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), _C_CARD_HI, -1)
-            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), _C_ACCENT, 2)
+            cv2.rectangle(overlay, (dx0, dy0), (dx1, dy1), (ol_b, ol_g, ol_r), 2)
             font = cv2.FONT_HERSHEY_DUPLEX
             cell_px_w = dx1 - dx0
             scale = max(1.0, min(3.0, cell_px_w / 40.0))
@@ -384,80 +554,121 @@ class GazeKeyboard:
             tx = (dx0 + dx1) // 2 - tw // 2
             ty = (dy0 + dy1) // 2 + th_t // 2
             cv2.putText(overlay, cap_label, (tx, ty), font, scale, _C_ACCENT2, thick, cv2.LINE_AA)
-            if not self._dwell_triggered:
-                elapsed = time.time() - self._cell_enter_time
-                progress = max(0.0, min(1.0, elapsed / self.dwell_seconds))
-                if progress > 0:
-                    fill_h = int(round((dy1 - dy0) * progress))
-                    cv2.rectangle(overlay, (dx0, dy1 - fill_h), (dx1, dy1), _C_GREEN, -1)
+            type_lbl = "type"
+            cv2.putText(
+                overlay,
+                type_lbl,
+                (dx0 + 4, dy1 - 6),
+                font,
+                0.38 * scale,
+                _C_MUTED,
+                1,
+                cv2.LINE_AA,
+            )
 
         if self.block_input:
             dim = np.zeros_like(overlay)
             cv2.addWeighted(overlay, 0.32, dim, 0.68, 0, dst=overlay)
-        cv2.addWeighted(overlay, 0.62, frame, 0.38, 0, dst=frame)
+        ka = self._profile.overlay_key_alpha
+        cv2.addWeighted(overlay, ka, frame, 1.0 - ka, 0, dst=frame)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         sf = max(0.45, h / 1080.0)
-        dwell_ms = int(self.dwell_seconds * 1000)
 
-        cv2.rectangle(frame, (0, 0), (w, hint_h), _C_BAR, -1)
-        cv2.line(frame, (0, hint_h - 1), (w, hint_h - 1), _C_KEY_EDGE, 1)
-        if self.suggestions:
-            hint = f"Choose with blinks: 1 / 2 / 3  =  options 1-3   |   4 blinks = cancel   |   Type: {dwell_ms}ms dwell"
-        elif not self.input_enabled:
-            if self.spoken_buffer is not None:
-                hint = (
-                    f"IDLE - mic ON for context  |  3 blinks = start typing  |  {dwell_ms}ms dwell when typing"
-                )
-            else:
-                hint = (
-                    f"IDLE  |  3 blinks = start typing  |  {dwell_ms}ms dwell when typing"
-                )
-        elif self.spoken_buffer is not None:
-            hint = (
-                f"Typing - mic ON  |  dwell {dwell_ms}ms  |  gaze DEL = delete  |  3 blinks = run inference"
-            )
-        else:
-            hint = (
-                f"Typing  |  dwell {dwell_ms}ms  |  gaze DEL = delete  |  3 blinks = run inference"
-            )
+        kbd_top_px = self._scaled(self._kbd_top, sy)
+        title_h_px = self._scaled(self._chat_title_h, sy)
+
+        # Single chat-style panel: mic + history + your typing (+ suggestions inside same box).
+        cv2.rectangle(frame, (0, 0), (w, kbd_top_px), _C_PANEL, -1)
+        cv2.line(frame, (0, kbd_top_px - 1), (w, kbd_top_px - 1), _C_KEY_EDGE, 1)
+        cv2.rectangle(frame, (0, 0), (w, title_h_px), _C_BAR, -1)
         cv2.putText(
             frame,
-            hint,
-            (int(16 * sf), int(hint_h * 0.68)),
-            font,
-            0.62 * sf,
-            _C_MUTED,
+            "Conversation",
+            (int(18 * sf), int(title_h_px * 0.72)),
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.72 * sf,
+            _C_TEXT,
             max(1, int(2 * sf)),
             cv2.LINE_AA,
         )
-
-        suggest_top = hint_h
-        suggest_bot = hint_h + suggest_h
         if self.suggestions:
-            cv2.rectangle(frame, (0, suggest_top), (w, suggest_bot), _C_PANEL, -1)
-            cv2.line(frame, (0, suggest_bot - 1), (w, suggest_bot - 1), _C_KEY_EDGE, 1)
-            title = "Pick your phrase"
+            subhint = "Pick a reply: 1 / 2 / 3 blinks  |  4 blinks = cancel"
+        elif not self.input_enabled:
+            subhint = (
+                "Idle  |  3 blinks = unlock typing  |  mic listens for context when enabled"
+            )
+        else:
+            subhint = (
+                "Blink on key = type  |  Eyes closed ~{:.0f}s = confirm/send  |  DEL = backspace"
+            ).format(self.infer_confirm_hold_s)
+        cv2.putText(
+            frame,
+            subhint,
+            (int(14 * sf), int(title_h_px + 18 * sf)),
+            font,
+            0.48 * sf,
+            _C_MUTED,
+            1,
+            cv2.LINE_AA,
+        )
+
+        body_y0 = int(title_h_px + 36 * sf)
+
+        if self.block_input:
+            pad = int(14 * sf)
+            status = self.block_overlay_text or "Please wait..."
+            y = body_y0 + int(22 * sf)
+            (tw, _), _ = cv2.getTextSize(status, font, 0.62 * sf, max(1, int(2 * sf)))
             cv2.putText(
                 frame,
-                title,
-                (int(18 * sf), int(suggest_top + 26 * sf)),
-                cv2.FONT_HERSHEY_DUPLEX,
-                0.72 * sf,
-                _C_TEXT,
+                status,
+                (pad, y),
+                font,
+                0.62 * sf,
+                _C_ACCENT2,
                 max(1, int(2 * sf)),
                 cv2.LINE_AA,
             )
+            y += int(30 * sf)
+            if self.tts_spoken_text:
+                spoken = self.tts_spoken_text.encode("ascii", errors="replace").decode("ascii")
+                max_c = max(24, int((w - 2 * pad) / (7 * sf)))
+                for line in _wrap_text_lines(spoken, max_chars=max_c):
+                    cv2.putText(
+                        frame,
+                        line,
+                        (pad, y),
+                        font,
+                        0.58 * sf,
+                        _C_TYPED,
+                        max(1, int(2 * sf)),
+                        cv2.LINE_AA,
+                    )
+                    y += int(26 * sf)
+                    if y > kbd_top_px - int(12 * sf):
+                        break
+        elif self.suggestions:
             pad = int(14 * sf)
-            footer_h = int(36 * sf)
-            card_top = int(suggest_top + 38 * sf)
-            card_bot = suggest_bot - footer_h
+            suggest_top = body_y0
+            suggest_bot = kbd_top_px - int(10 * sf)
+            card_top = int(suggest_top + 8 * sf)
+            card_bot = suggest_bot - int(28 * sf)
             n_cards = min(3, len(self.suggestions))
             gap = int(10 * sf)
             inner_w = w - 2 * pad
             card_w = (inner_w - gap * (n_cards - 1)) // max(1, n_cards)
             pending = self.pending_suggest_blink_count
-
+            cv2.putText(
+                frame,
+                "Assistant suggestions",
+                (pad, int(suggest_top + 4 * sf)),
+                cv2.FONT_HERSHEY_DUPLEX,
+                0.58 * sf,
+                _C_ACCENT2,
+                max(1, int(2 * sf)),
+                cv2.LINE_AA,
+            )
             labels = ("1 blink", "2 blinks", "3 blinks")
             for i in range(n_cards):
                 sug = self.suggestions[i]
@@ -471,7 +682,6 @@ class GazeKeyboard:
                 badge_cy = card_top + int((card_bot - card_top) * 0.28)
                 r = int(min(22 * sf, card_w * 0.14))
                 cv2.circle(frame, (badge_cx, badge_cy), r, _C_ACCENT, -1, cv2.LINE_AA)
-                cv2.circle(frame, (badge_cx, badge_cy), r, (200, 230, 255), 1, cv2.LINE_AA)
                 dig = str(i + 1)
                 (tw, th_t), _ = cv2.getTextSize(dig, cv2.FONT_HERSHEY_DUPLEX, 1.0 * sf, 2)
                 cv2.putText(
@@ -507,124 +717,111 @@ class GazeKeyboard:
                         cv2.LINE_AA,
                     )
                     y_txt += int(22 * sf)
-
             foot = (
                 "4 quick blinks = cancel  |  pause after last blink: "
-                "~0.55s for 2-3 blinks, ~1.35s if you only blink once (option 1)"
+                "~0.55s for 2-3 blinks, ~1.35s if only 1 blink (option 1)"
             )
             cv2.putText(
                 frame,
                 foot,
-                (pad, suggest_bot - int(12 * sf)),
+                (pad, suggest_bot - int(8 * sf)),
                 font,
-                0.48 * sf,
+                0.45 * sf,
                 _C_MUTED,
                 1,
                 cv2.LINE_AA,
             )
             if pending > 0:
-                pulse = f"Blinks detected: {pending}"
                 cv2.putText(
                     frame,
-                    pulse,
-                    (w - int(220 * sf), int(suggest_top + 26 * sf)),
+                    f"Blinks: {pending}",
+                    (w - int(160 * sf), int(suggest_top + 4 * sf)),
                     font,
-                    0.55 * sf,
+                    0.52 * sf,
                     _C_ACCENT2,
                     max(1, int(2 * sf)),
                     cv2.LINE_AA,
                 )
-        elif self.block_input:
-            cv2.rectangle(frame, (0, suggest_top), (w, suggest_bot), _C_PANEL, -1)
-            loading_text = self.block_overlay_text or "Please wait..."
-            (tw, _), _ = cv2.getTextSize(loading_text, font, 0.85 * sf, max(1, int(2 * sf)))
-            tx = (w - tw) // 2
-            ty = suggest_top + int(suggest_h * 0.55)
-            cv2.putText(
-                frame,
-                loading_text,
-                (tx, ty),
-                font,
-                0.85 * sf,
-                _C_ACCENT2,
-                max(1, int(2 * sf)),
-                cv2.LINE_AA,
-            )
-        elif self.spoken_buffer is not None:
-            cv2.rectangle(frame, (0, suggest_top), (w, suggest_bot), _C_PANEL, -1)
-            cv2.line(frame, (0, suggest_bot - 1), (w, suggest_bot - 1), _C_KEY_EDGE, 1)
-            if self.input_enabled:
-                title = "Microphone (sent with next inference)"
-                sub = "Included once when you run inference (3 blinks)"
-            else:
-                title = "Microphone (listening — idle)"
-                sub = "Speak anytime; 3 blinks unlock typing; inference uses speech + letters"
-            cv2.putText(
-                frame,
-                title,
-                (int(18 * sf), int(suggest_top + 22 * sf)),
-                cv2.FONT_HERSHEY_DUPLEX,
-                0.58 * sf,
-                _C_TEXT,
-                max(1, int(2 * sf)),
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                sub,
-                (int(18 * sf), int(suggest_top + 48 * sf)),
-                font,
-                0.5 * sf,
-                _C_MUTED,
-                1,
-                cv2.LINE_AA,
-            )
-            y_line = int(suggest_top + 72 * sf)
-            for line in self.spoken_buffer.snapshot_lines_for_ui(4):
-                safe = line.encode("ascii", errors="replace").decode("ascii")
-                safe = _truncate(safe, 96)
+        else:
+            y_line = float(body_y0)
+            if self.input_enabled and not self.block_input and not self.suggestions:
+                hold = max(0.5, float(self.infer_confirm_hold_s))
+                acc = min(hold, self.infer_confirm_accum_s)
                 cv2.putText(
                     frame,
-                    safe,
-                    (int(18 * sf), y_line),
+                    f"Confirm: eyes closed {acc:.1f} / {hold:.1f}s",
+                    (int(14 * sf), int(y_line + 14 * sf)),
                     font,
-                    0.46 * sf,
+                    0.52 * sf,
+                    _C_GREEN,
+                    1,
+                    cv2.LINE_AA,
+                )
+                y_line += 28 * sf
+            if self.spoken_buffer is not None:
+                cv2.putText(
+                    frame,
+                    "Voice (mic)",
+                    (int(16 * sf), int(y_line + 16 * sf)),
+                    cv2.FONT_HERSHEY_DUPLEX,
+                    0.52 * sf,
+                    _C_ACCENT2,
+                    max(1, int(2 * sf)),
+                    cv2.LINE_AA,
+                )
+                y_line += 36 * sf
+                for line in self.spoken_buffer.snapshot_lines_for_ui(4):
+                    safe = line.encode("ascii", errors="replace").decode("ascii")
+                    safe = _truncate(safe, 96)
+                    cv2.putText(
+                        frame,
+                        safe,
+                        (int(22 * sf), int(y_line)),
+                        font,
+                        0.46 * sf,
+                        _C_MUTED,
+                        1,
+                        cv2.LINE_AA,
+                    )
+                    y_line += 20 * sf
+                y_line += 8 * sf
+
+            cv2.putText(
+                frame,
+                "You (typed)",
+                (int(16 * sf), int(y_line + 16 * sf)),
+                cv2.FONT_HERSHEY_DUPLEX,
+                0.52 * sf,
+                _C_ACCENT,
+                max(1, int(2 * sf)),
+                cv2.LINE_AA,
+            )
+            y_line += 34 * sf
+            typed_str = self.typed_text
+            for hist_str in self.history[-3:]:
+                hsafe = hist_str.encode("ascii", errors="replace").decode("ascii")
+                cv2.putText(
+                    frame,
+                    f"Last: {hsafe}",
+                    (int(22 * sf), int(y_line)),
+                    font,
+                    0.5 * sf,
                     _C_MUTED,
                     1,
                     cv2.LINE_AA,
                 )
-                y_line += int(20 * sf)
-
-        status_top = suggest_bot
-        cv2.rectangle(frame, (0, status_top), (w, status_top + status_h), (30, 36, 44), -1)
-
-        typed_str = self.typed_text
-        lines_to_draw: list[tuple[str, tuple[int, int, int]]] = []
-        avail_h = text_bot - text_top
-        line_h_px = max(20, int(avail_h * 0.22))
-        max_lines = max(1, avail_h // line_h_px)
-
-        for hist_str in self.history[-max(1, max_lines - 1) :]:
-            # ASCII only: OpenCV Hershey fonts cannot render Unicode bullets (e.g. U+2022).
-            lines_to_draw.append((f"> {hist_str}", _C_MUTED))
-        if typed_str:
-            lines_to_draw.append((typed_str + "_", _C_TYPED))
-
-        if lines_to_draw:
-            total_h = len(lines_to_draw) * line_h_px + 10
-            panel_top = text_top
-            panel_bot = min(text_top + total_h, text_bot)
-            if panel_bot > panel_top:
-                sub = frame[panel_top:panel_bot, 0:w]
-                dark = np.zeros_like(sub)
-                cv2.addWeighted(sub, 0.22, dark, 0.78, 0, dst=sub)
-            cur_y = text_top + int(line_h_px * 0.8)
-            for txt, color in lines_to_draw:
-                is_typed = color == _C_TYPED
-                s = 0.88 * sf if is_typed else 0.62 * sf
-                t = max(1, int(3 * sf)) if is_typed else max(1, int(2 * sf))
-                cv2.putText(frame, txt, (int(16 * sf), cur_y), font, s, color, t, cv2.LINE_AA)
-                cur_y += line_h_px
+                y_line += 22 * sf
+            if typed_str:
+                cv2.putText(
+                    frame,
+                    typed_str + "_",
+                    (int(22 * sf), int(y_line)),
+                    font,
+                    0.72 * sf,
+                    _C_TYPED,
+                    max(1, int(2 * sf)),
+                    cv2.LINE_AA,
+                )
 
         coords_parts: list[str] = []
         if left_iris is not None:
@@ -633,9 +830,10 @@ class GazeKeyboard:
             coords_parts.append(f"R {right_iris[0]:+.2f},{right_iris[1]:+.2f}")
         if coords_parts:
             cv2.rectangle(frame, (0, h - bottom_h), (w, h), _C_BAR, -1)
+            bar_txt = "   ".join(coords_parts) + f"  |  gaze: {self._gaze_model_label}"
             cv2.putText(
                 frame,
-                "   ".join(coords_parts),
+                bar_txt,
                 (int(12 * sf), h - int(9 * sf)),
                 font,
                 0.42 * sf,

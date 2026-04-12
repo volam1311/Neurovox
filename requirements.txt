@@ -1,4 +1,8 @@
 # Pin versions for reproducible deploys; upgrade after smoke-testing.
+# Install: pip install -r requirements.txt
+#
+# Gaze calibration imports `sklearn` — that comes from the PyPI package
+# `scikit-learn` (do not use a package literally named `sklearn`).
 mediapipe>=0.10.9,<0.11
 opencv-python>=4.8.0,<5
 numpy>=1.24.0,<3

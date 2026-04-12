@@ -46,7 +46,7 @@ def detect_screen_resolution() -> tuple[int, int] | None:
 class MonitorConfig:
     """Tuned defaults for live webcam use (latency over max resolution)."""
 
-    camera_index: int = 0
+    camera_index: int = 2
     # Downscale width for inference; height preserves aspect ratio. Smaller = faster.
     process_width: int = 640
     max_num_faces: int = 1

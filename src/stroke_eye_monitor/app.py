@@ -62,6 +62,7 @@ def _build_live_pipeline(
             spoken_buffer=spoken_buffer,
             margin_top_frac=getattr(args, "kbd_top", None),
             margin_bot_frac=getattr(args, "kbd_bottom", None),
+            infer_confirm_hold_s=float(getattr(args, "infer_confirm_seconds", 3.0)),
         )
 
     return LiveEyePipeline(
@@ -75,14 +76,23 @@ def _build_live_pipeline(
         spoken_buffer=spoken_buffer,
         keyboard_gaze_median_n=getattr(args, "gaze_keyboard_median", 1),
         keyboard_gaze_gain=getattr(args, "gaze_keyboard_gain", 1.0),
+        blink_close_threshold=args.blink_close,
     )
 
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    if args.keyboard:
-        args.gaze = True
+    # Single entry flow: full keyboard+LLM by default; --collect is exclusive.
+    if args.collect:
+        args.keyboard = False
+        args.gaze = False
+    else:
+        if args.calibrate:
+            args.gaze = True
+            args.keyboard = True
+        if args.keyboard:
+            args.gaze = True
 
     from stroke_eye_monitor.config import detect_screen_resolution
 
@@ -109,32 +119,23 @@ def run(argv: list[str] | None = None) -> int:
             )
         return letterbox_to_width(frame, cfg.process_width)
 
-    if args.calibrate:
-        from stroke_eye_monitor.modes.gaze_calibration import calibrate_cli
-
-        rc = calibrate_cli(args, proc_fn, cfg)
-        if rc != 0:
-            return rc
-        print("Calibration complete — launching keyboard …", flush=True)
-        args.gaze = True
-        args.keyboard = True
-
     if args.collect:
         from stroke_eye_monitor.modes.data_collection import collect_cli
 
         return collect_cli(args, proc_fn, cfg)
 
     gaze_cal: GazeCalibration | None = None
+    gaze_path = Path(args.gaze_file)
     if args.gaze:
-        gp = Path(args.gaze_file)
-        if gp.is_file():
-            gaze_cal, err = _load_gaze_calibration_from_path(gp)
+        if gaze_path.is_file() and not args.calibrate:
+            gaze_cal, err = _load_gaze_calibration_from_path(gaze_path)
             if err != 0:
                 return err
-        elif args.no_auto_calibrate:
+            print(f"Using existing gaze calibration: {gaze_path.resolve()}", flush=True)
+        elif not gaze_path.is_file() and args.no_auto_calibrate:
             print(
-                f"Gaze calibration file not found: {gp.resolve()}. "
-                "Run without --no-auto-calibrate to calibrate once, or use --calibrate.",
+                f"Gaze calibration file not found: {gaze_path.resolve()}. "
+                "Remove --no-auto-calibrate to calibrate automatically, or use --calibrate.",
                 file=sys.stderr,
             )
             return 1
@@ -169,11 +170,16 @@ def run(argv: list[str] | None = None) -> int:
             if screen_res is not None
             else (args.gaze_width, args.gaze_height)
         )
-        print(
-            "No gaze calibration file found; starting interactive calibration (fixed grid or "
-            "random dots + ML gaze model), then continuing to the main view.",
-            flush=True,
-        )
+        if args.calibrate and gaze_path.is_file():
+            print(
+                "Re-calibrating (replacing existing gaze file), then continuing to the app…",
+                flush=True,
+            )
+        else:
+            print(
+                "Starting gaze calibration (no valid gaze file yet), then continuing to the app…",
+                flush=True,
+            )
         cal = run_calibration(
             cap=cap,
             detector=detector,
@@ -245,9 +251,10 @@ def run(argv: list[str] | None = None) -> int:
                         # (idle = paused). Do not resume here or mic would run while idle.
                         if kbd is not None:
                             # Stay in typing mode after TTS so mic/STT can resume without
-                            # another triple-blink unlock (idle only applies at app start).
+                            # another idle eye unlock (idle only applies at app start).
                             kbd.block_input = False
                             kbd.block_overlay_text = "Ready to type"
+                            kbd.tts_spoken_text = None
                         if spoken_buffer is not None:
                             spoken_buffer.clear()
 
@@ -255,6 +262,7 @@ def run(argv: list[str] | None = None) -> int:
                 if pl is not None and pl.keyboard_session is not None:
                     kbd = pl.keyboard_session.keyboard
                     kbd.block_overlay_text = "Speaking..."
+                    kbd.tts_spoken_text = text
                     kbd.block_input = True
                 threading.Thread(target=run, daemon=True).start()
 
@@ -306,7 +314,7 @@ def run(argv: list[str] | None = None) -> int:
             if voice_listener is not None and pipeline.keyboard_session is not None:
                 kb = pipeline.keyboard_session.keyboard
                 # Listen whenever we are not in LLM/TTS (block_input) or picking a suggestion,
-                # including while idle — so speech context is captured before triple-blink unlock.
+                # including while idle — so speech context is captured before eye-close unlock.
                 want_stt = (
                     not kb.block_input
                     and not kb.suggestions
