@@ -1,4 +1,7 @@
-"""Dark, high-contrast UI for readability (BGR for OpenCV)."""
+"""Dark, high-contrast UI for readability (BGR for OpenCV).
+
+Neurovox accent: teal #36D1C1 (logo).
+"""
 
 from __future__ import annotations
 
@@ -19,11 +22,12 @@ CHAT_KEY_EDGE: tuple[int, int, int] = (72, 74, 80)
 CHAT_TEXT: tuple[int, int, int] = (248, 248, 250)
 CHAT_MUTED: tuple[int, int, int] = (148, 150, 158)
 
-# Accent (warm; readable on dark)
-CHAT_ACCENT: tuple[int, int, int] = (108, 168, 255)
-CHAT_ACCENT_SOFT: tuple[int, int, int] = (140, 190, 240)
+# Primary accent: #36D1C1 → BGR (193, 209, 54)
+CHAT_ACCENT: tuple[int, int, int] = (193, 209, 54)
+# Softer teal for fills / secondary emphasis
+CHAT_ACCENT_SOFT: tuple[int, int, int] = (120, 175, 85)
 
-# Text on accent fills (badges)
+# Text on accent fills (badges on bright teal)
 CHAT_ON_ACCENT: tuple[int, int, int] = (28, 30, 34)
 
 # Suggestion cards
@@ -34,11 +38,11 @@ CHAT_CARD_HI: tuple[int, int, int] = (48, 50, 58)
 # Status / progress
 CHAT_SUCCESS: tuple[int, int, int] = (140, 220, 160)
 
-# Large reset control (header)
-RESET_BTN_FILL: tuple[int, int, int] = (52, 78, 118)
-RESET_BTN_BORDER: tuple[int, int, int] = (120, 170, 255)
+# Optional key highlights (match accent)
+RESET_BTN_FILL: tuple[int, int, int] = (70, 120, 55)
+RESET_BTN_BORDER: tuple[int, int, int] = CHAT_ACCENT
 RESET_BTN_TEXT: tuple[int, int, int] = CHAT_TEXT
-RESET_BTN_HI: tuple[int, int, int] = (62, 92, 138)
+RESET_BTN_HI: tuple[int, int, int] = (90, 145, 70)
 
 # Back-compat for imports (legacy Neurovox names → chat palette)
 BRAND_OFF_WHITE = CHAT_APP_BG
